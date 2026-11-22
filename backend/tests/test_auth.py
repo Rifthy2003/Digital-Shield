@@ -14,6 +14,35 @@ def test_register_weak_password_rejected(client):
     assert resp.status_code == 422
 
 
+def test_register_oversized_password_rejected(client):
+    # 129 characters exceeds the 128-character maximum length limit
+    oversized = "StrongPass123" + "a" * 116
+    assert len(oversized) == 129
+    resp = client.post("/api/v1/auth/register", json={"email": "oversized@example.com", "password": oversized})
+    assert resp.status_code == 422
+
+
+def test_login_oversized_password_rejected(client):
+    # 129 characters exceeds the 128-character maximum length limit
+    oversized = "A" * 129
+    resp = client.post("/api/v1/auth/login", json={"email": "anyone@example.com", "password": oversized})
+    assert resp.status_code == 422
+
+
+def test_register_and_login_max_length_password_succeeds(client):
+    # Exactly 128 characters (maximum allowed boundary)
+    max_len_password = "StrongPass123" + "a" * 115
+    assert len(max_len_password) == 128
+    payload = {"email": "boundary@example.com", "password": max_len_password, "full_name": "Boundary User"}
+    resp = client.post("/api/v1/auth/register", json=payload)
+    assert resp.status_code == 201
+
+    # Login with the exact same 128-character password succeeds and is not truncated
+    login_resp = client.post("/api/v1/auth/login", json={"email": payload["email"], "password": max_len_password})
+    assert login_resp.status_code == 200
+    assert "access_token" in login_resp.json()
+
+
 def test_register_duplicate_email_rejected(client, registered_user):
     resp = client.post("/api/v1/auth/register", json=registered_user)
     assert resp.status_code == 400

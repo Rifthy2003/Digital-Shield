@@ -31,7 +31,12 @@ def verify_password(plain_password: str, password_hash: str) -> bool:
     return _pwd_context.verify(plain_password, password_hash)
 
 
-def create_access_token(subject: str, role: str, extra_claims: dict[str, Any] | None = None) -> str:
+def create_access_token(
+    subject: str,
+    role: str,
+    extra_claims: dict[str, Any] | None = None,
+    session_id: str | None = None,
+) -> str:
     now = datetime.now(timezone.utc)
     payload = {
         "sub": subject,
@@ -40,6 +45,8 @@ def create_access_token(subject: str, role: str, extra_claims: dict[str, Any] | 
         "iat": now,
         "exp": now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
     }
+    if session_id:
+        payload["sid"] = session_id
     if extra_claims:
         payload.update(extra_claims)
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)

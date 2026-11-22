@@ -8,7 +8,16 @@ export function ProtectedRoute({ children, adminOnly = false }: { children: Reac
   const { user, loading } = useAuth();
 
   if (loading) {
-    return <div className="flex h-screen items-center justify-center text-slate-500">Loading…</div>;
+    return (
+      <div className="flex h-screen items-center justify-center bg-surface-light dark:bg-surface text-slate-500">
+        <div className="text-center">
+          <div className="mx-auto mb-3 flex h-10 w-10 animate-pulse items-center justify-center rounded-lg bg-brand-600 text-white font-bold">
+            IS
+          </div>
+          <p className="text-sm font-medium">Verifying session…</p>
+        </div>
+      </div>
+    );
   }
   if (!user) {
     return <Navigate to="/login" replace />;

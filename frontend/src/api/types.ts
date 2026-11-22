@@ -91,3 +91,19 @@ export interface AssistantResponse {
   answer: string;
   mode: "ai_provider" | "rule_based_fallback";
 }
+
+export interface ActiveSession {
+  id: string;
+  device_name: string;
+  client_type: string;
+  ip_address: string | null;
+  created_at: string;
+  last_active_at: string;
+  expires_at: string;
+  is_current: boolean;
+}
+
+export interface LogoutAllResponse {
+  message: string;
+  revoked_sessions_count: number;
+}

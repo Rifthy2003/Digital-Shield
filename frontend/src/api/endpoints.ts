@@ -1,15 +1,17 @@
 import { api } from "@/api/client";
 import type {
+  ActiveSession,
+  Alert,
   AssistantResponse,
   BreachCheckResult,
   DashboardData,
   IncidentReport,
+  LogoutAllResponse,
   MessageCheckResult,
   PasswordStrengthResult,
   TokenPair,
   UrlCheckResult,
   User,
-  Alert,
 } from "@/api/types";
 
 // --- Auth ---
@@ -22,6 +24,14 @@ export const loginUser = (data: { email: string; password: string }) =>
 export const logoutUser = (refresh_token: string) => api.post("/auth/logout", { refresh_token });
 
 export const fetchCurrentUser = () => api.get<User>("/auth/me").then((r) => r.data);
+
+export const fetchSessions = () => api.get<ActiveSession[]>("/auth/sessions").then((r) => r.data);
+
+export const revokeSession = (sessionId: string) =>
+  api.delete<{ message: string; revoked_session_id: string }>(`/auth/sessions/${sessionId}`).then((r) => r.data);
+
+export const logoutAllOtherSessions = () =>
+  api.post<LogoutAllResponse>("/auth/logout-all").then((r) => r.data);
 
 // --- Dashboard ---
 export const fetchDashboard = () => api.get<DashboardData>("/dashboard").then((r) => r.data);

@@ -1,4 +1,4 @@
-import axios, { type AxiosInstance } from "axios";
+import axios, { type AxiosInstance, type InternalAxiosRequestConfig } from "axios";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api/v1";
 
@@ -33,40 +33,79 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-let refreshInFlight: Promise<string> | null = null;
+// Concurrency control: Subscriber Queue Pattern to prevent simultaneous refresh calls
+let isRefreshing = false;
+let failedQueue: Array<{
+  resolve: (token: string) => void;
+  reject: (error: any) => void;
+}> = [];
 
-async function refreshAccessToken(): Promise<string> {
+function processQueue(error: any, token: string | null = null) {
+  failedQueue.forEach((prom) => {
+    if (error) {
+      prom.reject(error);
+    } else if (token) {
+      prom.resolve(token);
+    }
+  });
+  failedQueue = [];
+}
+
+export async function refreshAccessToken(): Promise<string> {
   const refreshToken = getRefreshToken();
   if (!refreshToken) {
     throw new Error("No refresh token available");
   }
+
+  // Use standalone axios instance to bypass request/response interceptor loops
   const resp = await axios.post(`${API_BASE_URL}/auth/refresh`, { refresh_token: refreshToken });
-  setTokens(resp.data.access_token, resp.data.refresh_token);
-  return resp.data.access_token as string;
+  const { access_token, refresh_token } = resp.data;
+  setTokens(access_token, refresh_token);
+  return access_token as string;
 }
 
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
-    const original = error.config;
-    // Never attempt to refresh the refresh/login/register calls themselves.
-    const skipRefresh = ["/auth/refresh", "/auth/login", "/auth/register"].some((p) =>
-      original?.url?.includes(p),
+    const originalRequest = error.config as InternalAxiosRequestConfig & { _retried?: boolean };
+
+    // Never intercept auth endpoints themselves to avoid infinite loops
+    const isAuthEndpoint = ["/auth/refresh", "/auth/login", "/auth/register"].some((p) =>
+      originalRequest?.url?.includes(p)
     );
-    if (error.response?.status === 401 && !original._retried && !skipRefresh) {
-      original._retried = true;
+
+    if (error.response?.status === 401 && !originalRequest._retried && !isAuthEndpoint) {
+      // If a refresh is already in progress, queue this request
+      if (isRefreshing) {
+        return new Promise<string>((resolve, reject) => {
+          failedQueue.push({ resolve, reject });
+        })
+          .then((newToken) => {
+            originalRequest.headers.Authorization = `Bearer ${newToken}`;
+            return api(originalRequest);
+          })
+          .catch((err) => {
+            return Promise.reject(err);
+          });
+      }
+
+      originalRequest._retried = true;
+      isRefreshing = true;
+
       try {
-        refreshInFlight = refreshInFlight ?? refreshAccessToken();
-        const newToken = await refreshInFlight;
-        refreshInFlight = null;
-        original.headers.Authorization = `Bearer ${newToken}`;
-        return api(original);
-      } catch {
-        refreshInFlight = null;
+        const newToken = await refreshAccessToken();
+        processQueue(null, newToken);
+        originalRequest.headers.Authorization = `Bearer ${newToken}`;
+        return api(originalRequest);
+      } catch (refreshErr) {
+        processQueue(refreshErr, null);
         clearTokens();
-        window.location.href = "/login";
+        return Promise.reject(refreshErr);
+      } finally {
+        isRefreshing = false;
       }
     }
+
     return Promise.reject(error);
-  },
+  }
 );

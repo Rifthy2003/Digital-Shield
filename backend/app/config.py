@@ -5,12 +5,23 @@ All secrets and environment-specific values are loaded from environment
 variables (see .env.example). Nothing sensitive is hardcoded here, and
 nothing here should ever be committed with real values filled in.
 """
+import logging
 from functools import lru_cache
 from typing import List
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import URL, make_url
+
+logger = logging.getLogger(__name__)
+
+INSECURE_DEV_JWT_SECRET = "CHANGE_ME_INSECURE_DEV_ONLY_DO_NOT_USE_IN_PRODUCTION"
+DISALLOWED_JWT_SECRETS = {
+    INSECURE_DEV_JWT_SECRET.lower(),
+    "replace_with_a_long_random_value",
+    "secret",
+    "password",
+}
 
 
 class Settings(BaseSettings):
@@ -60,10 +71,39 @@ class Settings(BaseSettings):
 
     # --- Auth / JWT ---
     # Generate with: python -c "import secrets; print(secrets.token_urlsafe(64))"
-    JWT_SECRET_KEY: str = Field(default="CHANGE_ME_INSECURE_DEV_ONLY_DO_NOT_USE_IN_PRODUCTION")
+    JWT_SECRET_KEY: str = Field(default=INSECURE_DEV_JWT_SECRET)
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+
+    @model_validator(mode="after")
+    def validate_jwt_secret_key(self) -> "Settings":
+        raw_secret = self.JWT_SECRET_KEY
+        if not raw_secret or not raw_secret.strip():
+            raise ValueError("JWT_SECRET_KEY cannot be empty or whitespace-only.")
+
+        is_production = self.ENVIRONMENT.strip().lower() == "production"
+
+        if is_production:
+            if raw_secret == INSECURE_DEV_JWT_SECRET:
+                raise ValueError(
+                    "JWT_SECRET_KEY must be explicitly configured in production; default fallback is not permitted."
+                )
+            if raw_secret.strip().lower() in DISALLOWED_JWT_SECRETS:
+                raise ValueError(
+                    "JWT_SECRET_KEY is set to a known insecure placeholder; a strong random secret is required in production."
+                )
+            if len(raw_secret.strip()) < 32:
+                raise ValueError(
+                    "JWT_SECRET_KEY must be at least 32 characters long in production."
+                )
+        else:
+            if raw_secret == INSECURE_DEV_JWT_SECRET:
+                logger.warning(
+                    "INSECURE CONFIGURATION: Using default development JWT secret fallback. Set JWT_SECRET_KEY in your environment for security."
+                )
+
+        return self
 
     # --- CORS ---
     CORS_ORIGINS: List[str] = ["http://localhost:5173", "http://localhost:5174", "http://localhost:3000"]

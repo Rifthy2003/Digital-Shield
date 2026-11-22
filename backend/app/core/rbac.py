@@ -6,16 +6,17 @@ which validates the bearer JWT and loads the user. This is the single choke
 point for "who is making this request" — route handlers never trust a
 user_id passed in the request body.
 """
+from datetime import datetime
 from typing import Annotated
 
 import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.core.security import decode_access_token
 from app.database import get_db
-from app.models.user import User, UserRole
+from app.models.user import User, UserRole, UserSession
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -36,12 +37,31 @@ def get_current_user(
         if payload.get("type") != "access":
             raise unauthorized
         user_id = payload.get("sub")
+        session_id = payload.get("sid")
     except jwt.PyJWTError:
         raise unauthorized
 
-    user = db.get(User, user_id)
-    if user is None or not user.is_active:
+    if not user_id or not session_id:
         raise unauthorized
+
+    session = (
+        db.query(UserSession)
+        .filter(
+            UserSession.id == session_id,
+            UserSession.user_id == user_id,
+            UserSession.is_active.is_(True),
+            UserSession.expires_at > datetime.utcnow(),
+        )
+        .options(joinedload(UserSession.user))
+        .first()
+    )
+
+    if session is None or session.user is None or not session.user.is_active:
+        raise unauthorized
+
+    user = session.user
+    setattr(user, "current_session_id", session.id)
+    setattr(user, "current_session", session)
     return user
 
 

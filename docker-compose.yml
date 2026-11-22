@@ -4,7 +4,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-infora}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_dev_only}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-Dig1234#!a}
       POSTGRES_DB: ${POSTGRES_DB:-infora_digital_shield}
     volumes:
       - infora_db_data:/var/lib/postgresql/data
@@ -22,7 +22,7 @@ services:
     env_file:
       - .env
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://infora:change_me_dev_only@db:5432/infora_digital_shield}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://infora:Dig1234%23%21a@db:5432/infora_digital_shield}
     depends_on:
       db:
         condition: service_healthy

@@ -1,5 +1,6 @@
 import { useAuth } from "@/context/AuthContext";
 import { Card } from "@/components/Card";
+import { SessionManager } from "@/components/SessionManager";
 
 export default function Profile() {
   const { user } = useAuth();
@@ -34,6 +35,8 @@ export default function Profile() {
           )}
         </div>
       </Card>
+
+      <SessionManager />
 
       <Card>
         <h2 className="mb-2 text-sm font-semibold text-slate-500">Data &amp; privacy</h2>

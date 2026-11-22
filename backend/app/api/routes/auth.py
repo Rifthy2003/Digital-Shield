@@ -1,8 +1,10 @@
+import uuid
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.core.rate_limit import limiter
 from app.core.rbac import CurrentUser
 from app.core.security import (
@@ -13,17 +15,22 @@ from app.core.security import (
     verify_password,
 )
 from app.database import get_db
-from app.models.user import RefreshToken, User
+from app.models.user import RefreshToken, User, UserSession
 from app.schemas.auth import (
     LoginRequest,
+    LogoutAllResponse,
     RefreshRequest,
     RegisterRequest,
+    RevokeSessionResponse,
+    SessionResponse,
     TokenResponse,
     UserResponse,
 )
 from app.utils.audit import record_audit_event
+from app.utils.device import extract_client_metadata
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
+settings = get_settings()
 
 MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_MINUTES = 15
@@ -75,13 +82,36 @@ def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)
     user.failed_login_attempts = 0
     user.locked_until = None
     user.last_login_at = datetime.utcnow()
-    db.commit()
 
-    access_token = create_access_token(subject=user.id, role=user.role.value)
+    # Create UserSession for newly authenticated login
+    meta = extract_client_metadata(request)
+    now = datetime.utcnow()
+    session_id = str(uuid.uuid4())
+    session_expires = now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    session = UserSession(
+        id=session_id,
+        user_id=user.id,
+        device_name=meta["device_name"],
+        client_type=meta["client_type"],
+        user_agent=meta["user_agent"],
+        ip_address=meta["ip_address"],
+        is_active=True,
+        created_at=now,
+        last_active_at=now,
+        expires_at=session_expires,
+    )
+    db.add(session)
+
     raw_refresh, refresh_hash, expires_at = generate_refresh_token()
-    db.add(RefreshToken(user_id=user.id, token_hash=refresh_hash, expires_at=expires_at))
+    db.add(RefreshToken(
+        session_id=session.id,
+        user_id=user.id,
+        token_hash=refresh_hash,
+        expires_at=expires_at,
+    ))
     db.commit()
 
+    access_token = create_access_token(subject=user.id, role=user.role.value, session_id=session.id)
     record_audit_event(db, actor_id=user.id, action="user.login", resource=user.id)
     return TokenResponse(access_token=access_token, refresh_token=raw_refresh)
 
@@ -100,26 +130,188 @@ def refresh(request: Request, payload: RefreshRequest, db: Session = Depends(get
     if user is None or not user.is_active:
         raise unauthorized
 
+    # Session management & validation
+    session_id = stored.session_id
+    if session_id:
+        session = db.get(UserSession, session_id)
+        if (
+            session is None
+            or session.user_id != user.id
+            or not session.is_active
+            or session.expires_at < datetime.utcnow()
+        ):
+            raise unauthorized
+        session.last_active_at = datetime.utcnow()
+    else:
+        # Legacy Refresh Token compatibility:
+        # If refreshing a legacy token without session_id (or missing session record),
+        # create a new UserSession for this device so the client seamlessly transitions into session tracking.
+        meta = extract_client_metadata(request)
+        now = datetime.utcnow()
+        session_id = str(uuid.uuid4())
+        session = UserSession(
+            id=session_id,
+            user_id=user.id,
+            device_name=meta["device_name"],
+            client_type=meta["client_type"],
+            user_agent=meta["user_agent"],
+            ip_address=meta["ip_address"],
+            is_active=True,
+            created_at=now,
+            last_active_at=now,
+            expires_at=now + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
+        )
+        db.add(session)
+        stored.session_id = session.id
+
     # Rotate: revoke the used token and issue a new one (prevents replay).
     stored.revoked = True
     new_raw, new_hash, new_expires = generate_refresh_token()
-    db.add(RefreshToken(user_id=user.id, token_hash=new_hash, expires_at=new_expires))
+    db.add(RefreshToken(
+        session_id=session_id,
+        user_id=user.id,
+        token_hash=new_hash,
+        expires_at=new_expires,
+    ))
     db.commit()
 
-    access_token = create_access_token(subject=user.id, role=user.role.value)
+    access_token = create_access_token(subject=user.id, role=user.role.value, session_id=session_id)
     return TokenResponse(access_token=access_token, refresh_token=new_raw)
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 def logout(payload: RefreshRequest, user: CurrentUser, db: Session = Depends(get_db)):
-    token_hash = hash_token(payload.refresh_token)
-    stored = db.query(RefreshToken).filter(RefreshToken.token_hash == token_hash, RefreshToken.user_id == user.id).first()
-    if stored:
-        stored.revoked = True
-        db.commit()
+    # 1. Invalidate the caller's active session and its refresh tokens
+    current_sid = getattr(user, "current_session_id", None)
+    if current_sid:
+        current_session = db.get(UserSession, current_sid)
+        if current_session and current_session.user_id == user.id:
+            current_session.is_active = False
+        db.query(RefreshToken).filter(
+            RefreshToken.session_id == current_sid,
+            RefreshToken.user_id == user.id,
+        ).update({"revoked": True})
+
+    # 2. Invalidate refresh token passed in payload and its session (if separate)
+    if payload.refresh_token:
+        token_hash = hash_token(payload.refresh_token)
+        stored = db.query(RefreshToken).filter(
+            RefreshToken.token_hash == token_hash,
+            RefreshToken.user_id == user.id,
+        ).first()
+        if stored:
+            stored.revoked = True
+            if stored.session_id and stored.session_id != current_sid:
+                rf_session = db.get(UserSession, stored.session_id)
+                if rf_session and rf_session.user_id == user.id:
+                    rf_session.is_active = False
+                db.query(RefreshToken).filter(
+                    RefreshToken.session_id == stored.session_id,
+                    RefreshToken.user_id == user.id,
+                ).update({"revoked": True})
+
+    db.commit()
     record_audit_event(db, actor_id=user.id, action="user.logout", resource=user.id)
 
 
 @router.get("/me", response_model=UserResponse)
 def get_me(user: CurrentUser):
     return user
+
+
+@router.get("/sessions", response_model=list[SessionResponse])
+def list_active_sessions(user: CurrentUser, db: Session = Depends(get_db)):
+    """List all active, non-expired sessions belonging to the authenticated user."""
+    now = datetime.utcnow()
+    sessions = (
+        db.query(UserSession)
+        .filter(
+            UserSession.user_id == user.id,
+            UserSession.is_active.is_(True),
+            UserSession.expires_at > now,
+        )
+        .order_by(UserSession.last_active_at.desc())
+        .all()
+    )
+    current_sid = getattr(user, "current_session_id", None)
+    return [
+        SessionResponse(
+            id=s.id,
+            device_name=s.device_name,
+            client_type=s.client_type,
+            ip_address=s.ip_address,
+            created_at=s.created_at.isoformat(),
+            last_active_at=s.last_active_at.isoformat(),
+            expires_at=s.expires_at.isoformat(),
+            is_current=(s.id == current_sid),
+        )
+        for s in sessions
+    ]
+
+
+@router.delete("/sessions/{session_id}", response_model=RevokeSessionResponse)
+def revoke_session(session_id: str, user: CurrentUser, db: Session = Depends(get_db)):
+    """Revoke a specific session belonging to the authenticated user."""
+    session = db.get(UserSession, session_id)
+    if session is None or session.user_id != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found",
+        )
+
+    session.is_active = False
+    # Revoke all associated refresh tokens for this session
+    db.query(RefreshToken).filter(
+        RefreshToken.session_id == session.id,
+        RefreshToken.user_id == user.id,
+    ).update({"revoked": True})
+    db.commit()
+
+    record_audit_event(
+        db,
+        actor_id=user.id,
+        action="user.session_revoked",
+        resource=session_id,
+        details={"session_id": session_id, "device_name": session.device_name},
+    )
+    return RevokeSessionResponse(
+        message="Session revoked successfully",
+        revoked_session_id=session_id,
+    )
+
+
+@router.post("/logout-all", response_model=LogoutAllResponse)
+def logout_all_other_devices(user: CurrentUser, db: Session = Depends(get_db)):
+    """Deactivate all active sessions for the authenticated user except the current session."""
+    current_sid = getattr(user, "current_session_id", None)
+    now = datetime.utcnow()
+
+    query = db.query(UserSession).filter(
+        UserSession.user_id == user.id,
+        UserSession.is_active.is_(True),
+        UserSession.expires_at > now,
+    )
+    if current_sid:
+        query = query.filter(UserSession.id != current_sid)
+
+    other_sessions = query.all()
+    revoked_count = len(other_sessions)
+
+    for s in other_sessions:
+        s.is_active = False
+        db.query(RefreshToken).filter(
+            RefreshToken.session_id == s.id,
+            RefreshToken.user_id == user.id,
+        ).update({"revoked": True})
+
+    db.commit()
+    record_audit_event(
+        db,
+        actor_id=user.id,
+        action="user.logout_all_others",
+        details={"revoked_count": revoked_count},
+    )
+    return LogoutAllResponse(
+        message="All other sessions have been revoked successfully.",
+        revoked_sessions_count=revoked_count,
+    )
