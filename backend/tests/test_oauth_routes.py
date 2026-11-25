@@ -389,7 +389,21 @@ def test_expired_invalid_state_and_revocation_failure_still_deletes_local(client
         app.dependency_overrides.pop(get_google_oauth_service, None)
 
 
-def test_concurrent_callback_attempts_allow_only_one(client, auth_headers):
+def test_concurrent_callback_attempts_allow_only_one(db_session):
+    from fastapi.testclient import TestClient
+    from sqlalchemy.orm import sessionmaker
+    from app.database import get_db
+
+    engine = db_session.get_bind()
+    TestSessionMaker = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+    def per_request_get_db():
+        session = TestSessionMaker()
+        try:
+            yield session
+        finally:
+            session.close()
+
     enc_key = Fernet.generate_key().decode()
     settings = _make_settings(enc_key)
     cipher = MultiFernetTokenCipher(enc_key)
@@ -415,22 +429,25 @@ def test_concurrent_callback_attempts_allow_only_one(client, auth_headers):
         cipher=cipher,
         http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=5.0),
     )
+    app.dependency_overrides[get_db] = per_request_get_db
     app.dependency_overrides[get_google_oauth_service] = lambda: svc
 
     try:
-        auth = client.post("/api/v1/oauth/google/authorize", headers=auth_headers).json()
-        state, nonce = _extract_state_and_nonce(auth["authorization_url"])
-        nonce_holder["nonce"] = nonce
+        with TestClient(app) as conc_client:
+            headers = _register_and_login(conc_client, "concurrent_oauth@example.com")
+            auth = conc_client.post("/api/v1/oauth/google/authorize", headers=headers).json()
+            state, nonce = _extract_state_and_nonce(auth["authorization_url"])
+            nonce_holder["nonce"] = nonce
 
-        def send_cb():
-            return client.post("/api/v1/oauth/google/callback", json={"code": "conc-code", "state": state}, headers=auth_headers).status_code
+            def send_cb():
+                return conc_client.post("/api/v1/oauth/google/callback", json={"code": "conc-code", "state": state}, headers=headers).status_code
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            statuses = list(pool.map(lambda _: send_cb(), range(2)))
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                statuses = list(pool.map(lambda _: send_cb(), range(2)))
 
-        assert sorted(statuses) == [200, 400]
+            assert sorted(statuses) == [200, 400]
     finally:
-        app.dependency_overrides.pop(get_google_oauth_service, None)
+        app.dependency_overrides.clear()
 
 
 def test_oauth_rate_limiting(client, auth_headers):

@@ -4,6 +4,14 @@ from pathlib import Path
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///./_test.db")
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-not-for-production")
+for _env_key in (
+    "GOOGLE_CLIENT_ID",
+    "GOOGLE_CLIENT_SECRET",
+    "GOOGLE_REDIRECT_URI",
+    "TOKEN_ENCRYPTION_KEY",
+    "TRUSTED_PROXIES",
+):
+    os.environ.pop(_env_key, None)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
