@@ -2,21 +2,25 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from app.core.rate_limit import limiter
+from app.core.rbac import OptionalCurrentUser
 from app.core.security import hash_identifier
 from app.database import get_db
 from app.models.alert import Alert, AlertCategory, AlertSeverity
 from app.models.message_check import MessageCheck
 from app.schemas.message_check import MessageCheckRequest, MessageCheckResponse
 from app.services.message_analysis import analyze_message
-from app.api.routes.url_checker import _optional_user
-from app.models.user import User
 
 router = APIRouter(prefix="/message-checker", tags=["message-checker"])
 
 
 @router.post("/check", response_model=MessageCheckResponse)
 @limiter.limit("20/minute")
-def check_message(request: Request, payload: MessageCheckRequest, db: Session = Depends(get_db), user: User | None = Depends(_optional_user)):
+def check_message(
+    request: Request,
+    payload: MessageCheckRequest,
+    db: Session = Depends(get_db),
+    user: OptionalCurrentUser = None,
+):
     result = analyze_message(payload.content)
 
     # Only the hash of the content is persisted — never the raw text (data minimization).

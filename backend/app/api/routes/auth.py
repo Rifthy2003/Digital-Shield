@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -9,6 +10,7 @@ from app.core.rate_limit import limiter
 from app.core.rbac import CurrentUser
 from app.core.security import (
     create_access_token,
+    dummy_verify_password,
     generate_refresh_token,
     hash_password,
     hash_token,
@@ -32,9 +34,6 @@ from app.utils.device import extract_client_metadata
 router = APIRouter(prefix="/auth", tags=["authentication"])
 settings = get_settings()
 
-MAX_FAILED_ATTEMPTS = 5
-LOCKOUT_MINUTES = 15
-
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 @limiter.limit("10/minute")
@@ -52,32 +51,37 @@ def register(request: Request, payload: RegisterRequest, db: Session = Depends(g
     db.add(user)
     db.commit()
     db.refresh(user)
-    record_audit_event(db, actor_id=user.id, action="user.registered", resource=user.id)
+    record_audit_event(db, actor_id=user.id, action="user.registered", resource=user.id, request=request)
     return user
 
 
 @router.post("/login", response_model=TokenResponse)
-@limiter.limit("10/minute")
+@limiter.limit("5/minute")
 def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)):
-    generic_error = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
+    generic_error = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid email or password",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
     user = db.query(User).filter(User.email == payload.email.lower()).first()
     if user is None:
+        dummy_verify_password(payload.password)
         raise generic_error
 
-    if user.locked_until and user.locked_until > datetime.utcnow():
-        raise HTTPException(status_code=status.HTTP_423_LOCKED, detail="Account temporarily locked due to repeated failed logins")
+    # If the user is locked or disabled, perform verification to equalize timing,
+    # then fail authentication without updating login timestamps or creating sessions.
+    is_locked = bool(user.locked_until and user.locked_until > datetime.utcnow())
+    is_disabled = not user.is_active
+
+    if is_locked or is_disabled:
+        verify_password(payload.password, user.password_hash)
+        raise generic_error
 
     if not verify_password(payload.password, user.password_hash):
         user.failed_login_attempts += 1
-        if user.failed_login_attempts >= MAX_FAILED_ATTEMPTS:
-            user.locked_until = datetime.utcnow() + timedelta(minutes=LOCKOUT_MINUTES)
-            user.failed_login_attempts = 0
         db.commit()
         raise generic_error
-
-    if not user.is_active:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled")
 
     user.failed_login_attempts = 0
     user.locked_until = None
@@ -112,18 +116,69 @@ def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)
     db.commit()
 
     access_token = create_access_token(subject=user.id, role=user.role.value, session_id=session.id)
-    record_audit_event(db, actor_id=user.id, action="user.login", resource=user.id)
+    record_audit_event(db, actor_id=user.id, action="user.login", resource=user.id, request=request)
     return TokenResponse(access_token=access_token, refresh_token=raw_refresh)
 
 
 @router.post("/refresh", response_model=TokenResponse)
 @limiter.limit("20/minute")
 def refresh(request: Request, payload: RefreshRequest, db: Session = Depends(get_db)):
-    token_hash = hash_token(payload.refresh_token)
-    stored = db.query(RefreshToken).filter(RefreshToken.token_hash == token_hash).first()
+    # SEC-06: Atomic concurrency control for refresh token rotation.
+    # On SQLite, take an immediate transaction lock. On PostgreSQL, row-level locking
+    # via with_for_update() serializes concurrent refresh attempts on the exact token row.
+    if db.bind and db.bind.dialect.name == "sqlite":
+        try:
+            db.execute(text("BEGIN IMMEDIATE"))
+        except Exception:
+            pass
 
-    unauthorized = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired refresh token")
-    if stored is None or stored.revoked or stored.expires_at < datetime.utcnow():
+    token_hash = hash_token(payload.refresh_token)
+    stored = (
+        db.query(RefreshToken)
+        .filter(RefreshToken.token_hash == token_hash)
+        .with_for_update()
+        .first()
+    )
+
+    unauthorized = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or expired refresh token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    if stored is None:
+        raise unauthorized
+
+    # Replay Detection (SEC-05 / SEC-06): If a previously consumed or revoked refresh token
+    # is presented (including by a losing concurrent request whose predecessor already committed),
+    # treat this as an indicator of compromise and immediately invalidate the associated session
+    # and all refresh tokens in that family.
+    if stored.revoked:
+        if stored.session_id:
+            try:
+                session = db.get(UserSession, stored.session_id)
+                if session and session.is_active:
+                    session.is_active = False
+                    db.query(RefreshToken).filter(
+                        RefreshToken.session_id == session.id,
+                    ).update({"revoked": True})
+                    record_audit_event(
+                        db,
+                        actor_id=stored.user_id,
+                        action="security.refresh_token_replayed",
+                        resource=session.id,
+                        details={
+                            "session_id": session.id,
+                            "reason": "Replay of revoked or consumed refresh token detected",
+                        },
+                        request=request,
+                    )
+                    db.commit()
+            except Exception:
+                db.rollback()
+                raise
+        raise unauthorized
+
+    if stored.expires_at < datetime.utcnow():
         raise unauthorized
 
     user = db.get(User, stored.user_id)
@@ -164,23 +219,27 @@ def refresh(request: Request, payload: RefreshRequest, db: Session = Depends(get
         db.add(session)
         stored.session_id = session.id
 
-    # Rotate: revoke the used token and issue a new one (prevents replay).
-    stored.revoked = True
-    new_raw, new_hash, new_expires = generate_refresh_token()
-    db.add(RefreshToken(
-        session_id=session_id,
-        user_id=user.id,
-        token_hash=new_hash,
-        expires_at=new_expires,
-    ))
-    db.commit()
+    try:
+        # Rotate: revoke the used token and issue a new one (prevents replay).
+        stored.revoked = True
+        new_raw, new_hash, new_expires = generate_refresh_token()
+        db.add(RefreshToken(
+            session_id=session_id,
+            user_id=user.id,
+            token_hash=new_hash,
+            expires_at=new_expires,
+        ))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
     access_token = create_access_token(subject=user.id, role=user.role.value, session_id=session_id)
     return TokenResponse(access_token=access_token, refresh_token=new_raw)
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-def logout(payload: RefreshRequest, user: CurrentUser, db: Session = Depends(get_db)):
+def logout(request: Request, payload: RefreshRequest, user: CurrentUser, db: Session = Depends(get_db)):
     # 1. Invalidate the caller's active session and its refresh tokens
     current_sid = getattr(user, "current_session_id", None)
     if current_sid:
@@ -211,7 +270,7 @@ def logout(payload: RefreshRequest, user: CurrentUser, db: Session = Depends(get
                 ).update({"revoked": True})
 
     db.commit()
-    record_audit_event(db, actor_id=user.id, action="user.logout", resource=user.id)
+    record_audit_event(db, actor_id=user.id, action="user.logout", resource=user.id, request=request)
 
 
 @router.get("/me", response_model=UserResponse)
@@ -250,7 +309,7 @@ def list_active_sessions(user: CurrentUser, db: Session = Depends(get_db)):
 
 
 @router.delete("/sessions/{session_id}", response_model=RevokeSessionResponse)
-def revoke_session(session_id: str, user: CurrentUser, db: Session = Depends(get_db)):
+def revoke_session(session_id: str, request: Request, user: CurrentUser, db: Session = Depends(get_db)):
     """Revoke a specific session belonging to the authenticated user."""
     session = db.get(UserSession, session_id)
     if session is None or session.user_id != user.id:
@@ -273,6 +332,7 @@ def revoke_session(session_id: str, user: CurrentUser, db: Session = Depends(get
         action="user.session_revoked",
         resource=session_id,
         details={"session_id": session_id, "device_name": session.device_name},
+        request=request,
     )
     return RevokeSessionResponse(
         message="Session revoked successfully",
@@ -281,7 +341,7 @@ def revoke_session(session_id: str, user: CurrentUser, db: Session = Depends(get
 
 
 @router.post("/logout-all", response_model=LogoutAllResponse)
-def logout_all_other_devices(user: CurrentUser, db: Session = Depends(get_db)):
+def logout_all_other_devices(request: Request, user: CurrentUser, db: Session = Depends(get_db)):
     """Deactivate all active sessions for the authenticated user except the current session."""
     current_sid = getattr(user, "current_session_id", None)
     now = datetime.utcnow()
@@ -310,6 +370,7 @@ def logout_all_other_devices(user: CurrentUser, db: Session = Depends(get_db)):
         actor_id=user.id,
         action="user.logout_all_others",
         details={"revoked_count": revoked_count},
+        request=request,
     )
     return LogoutAllResponse(
         message="All other sessions have been revoked successfully.",

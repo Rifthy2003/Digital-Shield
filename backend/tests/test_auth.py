@@ -64,9 +64,9 @@ def test_login_lockout_after_repeated_failures(client, registered_user):
     for _ in range(5):
         resp = client.post("/api/v1/auth/login", json={"email": registered_user["email"], "password": "WrongPassword123"})
         assert resp.status_code == 401
-    # 6th attempt should now be locked even with the CORRECT password
+    # 6th attempt from the same IP is rate-limited (HTTP 429), not globally locked (SEC-02)
     resp = client.post("/api/v1/auth/login", json={"email": registered_user["email"], "password": registered_user["password"]})
-    assert resp.status_code == 423
+    assert resp.status_code == 429
 
 
 def test_protected_route_requires_token(client):

@@ -1,11 +1,15 @@
 import enum
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+if TYPE_CHECKING:
+    from app.models.oauth import ConnectedAccount, OAuthState
 
 
 class UserRole(str, enum.Enum):
@@ -48,6 +52,12 @@ class User(Base):
         back_populates="user", cascade="all, delete-orphan"
     )
     refresh_tokens: Mapped[list["RefreshToken"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    oauth_states: Mapped[list["OAuthState"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    connected_accounts: Mapped[list["ConnectedAccount"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
 

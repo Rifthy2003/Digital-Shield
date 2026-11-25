@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from app.core.rate_limit import limiter
-from app.core.rbac import get_current_user
+from app.core.rbac import OptionalCurrentUser, get_optional_current_user
 from app.core.security import hash_identifier
 from app.database import get_db
 from app.models.alert import Alert, AlertCategory, AlertSeverity
@@ -15,25 +15,18 @@ from app.services.url_analysis import analyze_url
 
 router = APIRouter(prefix="/url-checker", tags=["url-checker"])
 
-
-def _optional_user(request: Request, db: Session = Depends(get_db)) -> User | None:
-    """The URL checker works for anonymous visitors too; logged-in users get history + alerts."""
-    auth_header = request.headers.get("authorization")
-    if not auth_header:
-        return None
-    try:
-        from app.core.security import decode_access_token
-
-        token = auth_header.removeprefix("Bearer ").strip()
-        payload = decode_access_token(token)
-        return db.get(User, payload.get("sub"))
-    except Exception:  # noqa: BLE001
-        return None
+# Alias for backwards compatibility
+_optional_user = get_optional_current_user
 
 
 @router.post("/check", response_model=UrlCheckResponse)
 @limiter.limit("20/minute")
-def check_url(request: Request, payload: UrlCheckRequest, db: Session = Depends(get_db), user: User | None = Depends(_optional_user)):
+def check_url(
+    request: Request,
+    payload: UrlCheckRequest,
+    db: Session = Depends(get_db),
+    user: OptionalCurrentUser = None,
+):
     result = analyze_url(payload.url)
 
     record = UrlCheck(

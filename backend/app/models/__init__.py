@@ -6,3 +6,4 @@ from app.models.message_check import MessageCheck  # noqa: F401
 from app.models.breach_check import BreachCheck  # noqa: F401
 from app.models.incident_report import IncidentReport  # noqa: F401
 from app.models.audit_log import AuditLog  # noqa: F401
+from app.models.oauth import ConnectedAccount, OAuthState, OAuthToken  # noqa: F401

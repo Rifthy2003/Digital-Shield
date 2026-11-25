@@ -1,6 +1,8 @@
 import re
 from fastapi import Request
 
+from app.core.client_ip import resolve_client_ip
+
 
 def parse_device_name(user_agent: str | None) -> str:
     """Derive a friendly, safe device and browser name from User-Agent without fingerprinting."""
@@ -69,14 +71,9 @@ def extract_client_metadata(request: Request) -> dict[str, str | None]:
     else:
         device_name = parse_device_name(user_agent)
 
-    # 4. IP Address (capped at 64 characters)
-    ip_address = None
-    forwarded = headers.get("x-forwarded-for")
-    if forwarded:
-        first_ip = forwarded.split(",")[0].strip()
-        ip_address = first_ip[:64] if first_ip else None
-    elif request.client and request.client.host:
-        ip_address = request.client.host[:64]
+    # 4. IP Address (resolved via centralized trusted-proxy logic, capped at 64 characters)
+    resolved_ip = resolve_client_ip(request)
+    ip_address = resolved_ip[:64] if resolved_ip else None
 
     return {
         "user_agent": user_agent,

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -28,9 +28,9 @@ def platform_stats(admin: AdminUser, db: Session = Depends(get_db)):
 
 
 @router.get("/incidents", response_model=list[IncidentReportResponse])
-def list_all_incidents(admin: AdminUser, db: Session = Depends(get_db)):
+def list_all_incidents(request: Request, admin: AdminUser, db: Session = Depends(get_db)):
     reports = db.query(IncidentReport).order_by(IncidentReport.created_at.desc()).all()
-    record_audit_event(db, actor_id=admin.id, action="admin.view_all_incidents")
+    record_audit_event(db, actor_id=admin.id, action="admin.view_all_incidents", request=request)
     return [
         IncidentReportResponse(
             report_id=r.report_id, category=r.category.value, description=r.description,
@@ -41,14 +41,14 @@ def list_all_incidents(admin: AdminUser, db: Session = Depends(get_db)):
 
 
 @router.get("/users/{user_id}")
-def view_user_record(user_id: str, admin: AdminUser, db: Session = Depends(get_db)):
+def view_user_record(user_id: str, request: Request, admin: AdminUser, db: Session = Depends(get_db)):
     """
     Deliberately logged every time: an admin viewing an individual citizen's
     record is a sensitive, auditable action, never a side effect of a
     general listing.
     """
     user = db.get(User, user_id)
-    record_audit_event(db, actor_id=admin.id, action="admin.view_user_record", resource=user_id)
+    record_audit_event(db, actor_id=admin.id, action="admin.view_user_record", resource=user_id, request=request)
     if user is None:
         return {"found": False}
     return {

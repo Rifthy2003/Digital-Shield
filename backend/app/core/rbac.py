@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Annotated
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session, joinedload
 
@@ -66,6 +66,29 @@ def get_current_user(
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
+
+
+def get_optional_current_user(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
+    db: Annotated[Session, Depends(get_db)],
+) -> User | None:
+    """
+    Returns the authenticated User if valid credentials are provided, or None for anonymous requests.
+    If an Authorization header is provided but invalid, revoked, or expired, raises HTTP 401 Unauthorized.
+    """
+    if "authorization" not in request.headers:
+        return None
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return get_current_user(credentials=credentials, db=db)
+
+
+OptionalCurrentUser = Annotated[User | None, Depends(get_optional_current_user)]
 
 
 def require_admin(user: CurrentUser) -> User:

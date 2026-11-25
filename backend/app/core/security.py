@@ -22,6 +22,12 @@ settings = get_settings()
 # Argon2id only — no legacy scheme, no fallback to a weaker hash.
 _pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 
+# Pre-computed dummy Argon2id hash used to mitigate timing side-channel attacks on login
+# when a user does not exist. Uses standard passlib Argon2id parameters (m=65536, t=3, p=4).
+DUMMY_PASSWORD_HASH = (
+    "$argon2id$v=19$m=65536,t=3,p=4$s7a2di4FwPj/H2MspVRqjQ$eX30MPTIC0PGk2fGembD/T9bNL80BiTAoEFtTKaW5/k"
+)
+
 
 def hash_password(plain_password: str) -> str:
     return _pwd_context.hash(plain_password)
@@ -29,6 +35,14 @@ def hash_password(plain_password: str) -> str:
 
 def verify_password(plain_password: str, password_hash: str) -> bool:
     return _pwd_context.verify(plain_password, password_hash)
+
+
+def dummy_verify_password(plain_password: str) -> bool:
+    """
+    Executes password verification against a pre-computed dummy Argon2id hash to consume
+    time equivalent to a real password verification. Always returns False.
+    """
+    return verify_password(plain_password, DUMMY_PASSWORD_HASH)
 
 
 def create_access_token(
