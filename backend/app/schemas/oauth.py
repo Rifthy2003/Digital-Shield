@@ -5,8 +5,13 @@ from pydantic import BaseModel, Field, field_validator
 class OAuthProviderInfo(BaseModel):
     provider: str
     display_name: str
+    account_type: str = "personal"
     configured: bool
     scopes: list[str]
+    capabilities: dict[str, str] = {}
+    required_permissions: list[str] = []
+    enterprise_only_restrictions: list[str] = []
+    limitations: list[str] = []
 
 
 class OAuthProvidersResponse(BaseModel):

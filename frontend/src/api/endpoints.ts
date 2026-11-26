@@ -111,5 +111,11 @@ export const startGoogleOAuth = () =>
 export const completeGoogleOAuth = (code: string, state: string) =>
   api.post<ConnectedAccount>("/oauth/google/callback", { code, state }).then((r) => r.data);
 
+export const startMicrosoftOAuth = () =>
+  api.post<OAuthAuthorizeResponse>("/oauth/microsoft/authorize").then((r) => r.data);
+
+export const completeMicrosoftOAuth = (code: string, state: string) =>
+  api.post<ConnectedAccount>("/oauth/microsoft/callback", { code, state }).then((r) => r.data);
+
 export const disconnectConnectedAccount = (accountId: string) =>
   api.delete<DisconnectAccountResponse>(`/oauth/accounts/${accountId}`).then((r) => r.data);

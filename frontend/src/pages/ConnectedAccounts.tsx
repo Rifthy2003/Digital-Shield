@@ -6,13 +6,39 @@ import {
   fetchConnectedAccounts,
   fetchOAuthProviders,
   startGoogleOAuth,
+  startMicrosoftOAuth,
 } from "@/api/endpoints";
 import type { ConnectedAccount, OAuthProviderInfo } from "@/api/types";
 import { Card } from "@/components/Card";
 import { useAuth } from "@/context/AuthContext";
 
+type SupportedProviderId = "google" | "microsoft";
+
+const SUPPORTED_PROVIDER_META: Record<
+  SupportedProviderId,
+  {
+    displayName: string;
+    description: string;
+    defaultLimitation: string;
+  }
+> = {
+  google: {
+    displayName: "Google",
+    description:
+      "Links your verified Google identity (basic profile and email). You can connect multiple Google accounts to your Infora profile.",
+    defaultLimitation:
+      "Personal Google OAuth does not expose private sign-in history, active devices, or Google 2FA status through these permissions.",
+  },
+  microsoft: {
+    displayName: "Microsoft",
+    description:
+      "Links your verified personal Microsoft account identity (basic profile and email). You can connect multiple Microsoft accounts to your Infora profile.",
+    defaultLimitation:
+      "Personal Microsoft OAuth does not expose private sign-in history, active devices, or MFA enrollment status through these permissions.",
+  },
+};
+
 const UPCOMING_PROVIDERS = [
-  { id: "microsoft", name: "Microsoft", note: "Account linking planned for a future release." },
   { id: "facebook", name: "Meta / Facebook", note: "Account linking planned for a future release." },
   { id: "linkedin", name: "LinkedIn", note: "Account linking planned for a future release." },
   { id: "apple", name: "Apple", note: "Account linking planned for a future release." },
@@ -30,7 +56,7 @@ export default function ConnectedAccounts({ onRedirect }: ConnectedAccountsProps
   const [providers, setProviders] = useState<OAuthProviderInfo[]>([]);
   const [accounts, setAccounts] = useState<ConnectedAccount[]>([]);
   const [loading, setLoading] = useState(true);
-  const [connecting, setConnecting] = useState(false);
+  const [connectingProvider, setConnectingProvider] = useState<SupportedProviderId | null>(null);
   const [disconnectingId, setDisconnectingId] = useState<string | null>(null);
   const [confirmDisconnect, setConfirmDisconnect] = useState<ConnectedAccount | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -67,18 +93,19 @@ export default function ConnectedAccounts({ onRedirect }: ConnectedAccountsProps
     }
   }
 
-  async function handleConnectGoogle() {
-    if (connecting) return;
-    setConnecting(true);
+  async function handleConnect(providerId: SupportedProviderId) {
+    if (connectingProvider !== null) return;
+    const displayName = SUPPORTED_PROVIDER_META[providerId].displayName;
+    setConnectingProvider(providerId);
     setError(null);
     try {
       const activeUser = user ?? (await restoreSession());
       if (!activeUser) {
-        setError("Your Infora session has expired. Please sign in again before linking Google.");
-        setConnecting(false);
+        setError(`Your Infora session has expired. Please sign in again before linking ${displayName}.`);
+        setConnectingProvider(null);
         return;
       }
-      const res = await startGoogleOAuth();
+      const res = providerId === "microsoft" ? await startMicrosoftOAuth() : await startGoogleOAuth();
       if (onRedirect) {
         onRedirect(res.authorization_url);
       } else {
@@ -87,21 +114,27 @@ export default function ConnectedAccounts({ onRedirect }: ConnectedAccountsProps
     } catch (err: unknown) {
       const detail =
         (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      setError(detail ?? "Unable to start Google account linking. Please try again.");
-      setConnecting(false);
+      setError(detail ?? `Unable to start ${displayName} account linking. Please try again.`);
+      setConnectingProvider(null);
     }
   }
 
   async function handleDisconnect(account: ConnectedAccount) {
     setDisconnectingId(account.id);
     setError(null);
+    const providerLabel =
+      account.provider === "microsoft"
+        ? "Microsoft"
+        : account.provider === "google"
+        ? "Google"
+        : account.provider;
     try {
       const res = await disconnectConnectedAccount(account.id);
       setConfirmDisconnect(null);
       setSuccessMessage(
         res.upstream_revocation_status === "revoked"
-          ? "Google account disconnected and upstream access revoked."
-          : "Google account disconnected from Infora."
+          ? `${providerLabel} account disconnected and upstream access revoked.`
+          : `${providerLabel} account disconnected from Infora.`
       );
       await loadData();
     } catch {
@@ -111,17 +144,21 @@ export default function ConnectedAccounts({ onRedirect }: ConnectedAccountsProps
     }
   }
 
-  const googleProvider = providers.find((p) => p.provider === "google");
-  const googleAccounts = accounts.filter((a) => a.provider === "google");
+  const confirmProviderName =
+    confirmDisconnect?.provider === "microsoft"
+      ? "Microsoft"
+      : confirmDisconnect?.provider === "google"
+      ? "Google"
+      : confirmDisconnect?.provider ?? "Provider";
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
       <div>
         <h1 className="text-2xl font-semibold">Connected Accounts</h1>
         <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">
-          Connecting your Google account allows Infora to securely link your account identity.
-          Available security information depends on the permissions and official capabilities
-          provided by Google.
+          Connecting your personal accounts allows Infora to securely link your verified account
+          identity. Available security information depends on the permissions and official
+          capabilities provided by each provider.
         </p>
       </div>
 
@@ -158,91 +195,124 @@ export default function ConnectedAccounts({ onRedirect }: ConnectedAccountsProps
         </div>
       )}
 
-      <Card className="space-y-4">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-base font-semibold">Google</h2>
-              {!loading && (
-                <span
-                  className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${
-                    googleProvider?.configured
-                      ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-                      : "bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300"
-                  }`}
-                >
-                  {googleProvider?.configured ? "Available" : "Not configured"}
-                </span>
-              )}
-            </div>
-            <p className="mt-1 text-xs text-slate-500">
-              Links your verified Google identity (basic profile and email). You can connect
-              multiple Google accounts to your Infora profile.
-            </p>
-          </div>
+      {(["google", "microsoft"] as const).map((providerId) => {
+        const meta = SUPPORTED_PROVIDER_META[providerId];
+        const providerInfo = providers.find((p) => p.provider === providerId);
+        const providerAccounts = accounts.filter((a) => a.provider === providerId);
+        const isConnecting = connectingProvider === providerId;
+        const limitationText =
+          providerInfo?.limitations?.join(" ") || meta.defaultLimitation;
 
-          <button
-            type="button"
-            disabled={loading || connecting || !googleProvider?.configured}
-            onClick={handleConnectGoogle}
-            className="shrink-0 rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {connecting ? "Redirecting…" : "Connect Google"}
-          </button>
-        </div>
-
-        {loading ? (
-          <div className="py-6 text-center text-sm text-slate-500">
-            Loading connected accounts…
-          </div>
-        ) : googleAccounts.length === 0 ? (
-          <div className="rounded-lg border border-dashed border-slate-200 p-5 text-center text-sm text-slate-500 dark:border-slate-800">
-            No Google accounts connected yet.
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {googleAccounts.map((account) => (
-              <div
-                key={account.id}
-                className="flex flex-col gap-3 rounded-lg border border-slate-200 p-4 dark:border-slate-800 sm:flex-row sm:items-center sm:justify-between"
-              >
-                <div className="space-y-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-medium">
-                      {account.display_name ?? account.provider_email ?? "Google Account"}
+        return (
+          <Card key={providerId} className="space-y-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-base font-semibold">{meta.displayName}</h2>
+                  {!loading && (
+                    <span
+                      className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                        providerInfo?.configured
+                          ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
+                          : "bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+                      }`}
+                    >
+                      {providerInfo?.configured ? "Available" : "Not configured"}
                     </span>
-                    <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs font-medium capitalize text-emerald-700 dark:text-emerald-400">
-                      {account.status}
-                    </span>
-                    {account.provider_email_verified && (
-                      <span className="rounded-full bg-brand-500/10 px-2 py-0.5 text-xs font-medium text-brand-600 dark:text-brand-400">
-                        Verified email
-                      </span>
-                    )}
-                  </div>
-                  {account.provider_email && (
-                    <p className="text-xs text-slate-600 dark:text-slate-300">
-                      {account.provider_email}
-                    </p>
                   )}
-                  <p className="text-xs text-slate-500">
-                    Connected {new Date(account.created_at).toLocaleDateString()}
-                  </p>
                 </div>
-
-                <button
-                  type="button"
-                  disabled={disconnectingId !== null}
-                  onClick={() => setConfirmDisconnect(account)}
-                  className="self-start rounded-lg border border-risk-high/30 px-3 py-1.5 text-xs font-semibold text-risk-high transition-colors hover:bg-risk-high/10 disabled:opacity-50 sm:self-center"
-                >
-                  {disconnectingId === account.id ? "Disconnecting…" : "Disconnect"}
-                </button>
+                <p className="mt-1 text-xs text-slate-500">{meta.description}</p>
               </div>
-            ))}
-          </div>
-        )}
-      </Card>
+
+              <button
+                type="button"
+                disabled={loading || connectingProvider !== null || !providerInfo?.configured}
+                onClick={() => handleConnect(providerId)}
+                className="shrink-0 rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {isConnecting ? "Redirecting…" : `Connect ${meta.displayName}`}
+              </button>
+            </div>
+
+            {providerInfo?.capabilities && (
+              <div className="rounded-lg border border-slate-200/80 bg-slate-50/60 p-3 text-xs dark:border-slate-800 dark:bg-slate-900/40">
+                <p className="font-medium text-slate-700 dark:text-slate-200">
+                  Security Capabilities ({meta.displayName} Personal)
+                </p>
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <span className="rounded bg-emerald-500/10 px-2 py-0.5 text-emerald-700 dark:text-emerald-400">
+                    Identity verification: {providerInfo.capabilities.identity_verification ?? "supported"}
+                  </span>
+                  <span className="rounded bg-slate-200 px-2 py-0.5 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                    Sign-in history: {providerInfo.capabilities.login_history ?? "requires_enterprise"}
+                  </span>
+                  <span className="rounded bg-slate-200 px-2 py-0.5 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                    Devices: {providerInfo.capabilities.device_session_visibility ?? "requires_enterprise"}
+                  </span>
+                  <span className="rounded bg-slate-200 px-2 py-0.5 text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                    MFA status: {providerInfo.capabilities.mfa_status ?? "requires_enterprise"}
+                  </span>
+                </div>
+                <p className="mt-2 text-slate-500">{limitationText}</p>
+              </div>
+            )}
+
+            {loading ? (
+              <div className="py-6 text-center text-sm text-slate-500">
+                Loading connected accounts…
+              </div>
+            ) : providerAccounts.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-slate-200 p-5 text-center text-sm text-slate-500 dark:border-slate-800">
+                No {meta.displayName} accounts connected yet.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {providerAccounts.map((account) => (
+                  <div
+                    key={account.id}
+                    className="flex flex-col gap-3 rounded-lg border border-slate-200 p-4 dark:border-slate-800 sm:flex-row sm:items-center sm:justify-between"
+                  >
+                    <div className="space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-medium">
+                          {account.display_name ??
+                            account.provider_email ??
+                            `${meta.displayName} Account`}
+                        </span>
+                        <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs font-medium capitalize text-emerald-700 dark:text-emerald-400">
+                          {account.status}
+                        </span>
+                        {account.provider_email_verified && (
+                          <span className="rounded-full bg-brand-500/10 px-2 py-0.5 text-xs font-medium text-brand-600 dark:text-brand-400">
+                            Verified email
+                          </span>
+                        )}
+                      </div>
+                      {account.provider_email && (
+                        <p className="text-xs text-slate-600 dark:text-slate-300">
+                          {account.provider_email}
+                        </p>
+                      )}
+                      <p className="text-xs text-slate-500">
+                        Connected {new Date(account.created_at).toLocaleDateString()}
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={disconnectingId !== null}
+                      onClick={() => setConfirmDisconnect(account)}
+                      className="self-start rounded-lg border border-risk-high/30 px-3 py-1.5 text-xs font-semibold text-risk-high transition-colors hover:bg-risk-high/10 disabled:opacity-50 sm:self-center"
+                    >
+                      {disconnectingId === account.id ? "Disconnecting…" : "Disconnect"}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+        );
+      })}
 
       <Card className="space-y-3">
         <h2 className="text-base font-semibold">Other Providers</h2>
@@ -273,14 +343,14 @@ export default function ConnectedAccounts({ onRedirect }: ConnectedAccountsProps
         >
           <Card className="w-full max-w-md space-y-4">
             <h3 id="disconnect-dialog-title" className="text-base font-semibold">
-              Disconnect Google Account?
+              Disconnect {confirmProviderName} Account?
             </h3>
             <p className="text-sm text-slate-600 dark:text-slate-300">
               This will unlink{" "}
               <span className="font-medium">
                 {confirmDisconnect.provider_email ?? confirmDisconnect.display_name ?? "this account"}
               </span>{" "}
-              from Infora Digital Shield and revoke its stored OAuth credentials.
+              from Infora Digital Shield and delete its stored OAuth credentials.
             </p>
             <div className="flex justify-end gap-2">
               <button

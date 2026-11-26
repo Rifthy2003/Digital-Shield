@@ -38,6 +38,7 @@ export default function App() {
         <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
         <Route path="/connected-accounts" element={<ProtectedRoute><ConnectedAccounts /></ProtectedRoute>} />
         <Route path="/oauth/google/callback" element={<OAuthCallback />} />
+        <Route path="/oauth/microsoft/callback" element={<OAuthCallback />} />
         <Route path="/admin" element={<ProtectedRoute adminOnly><Admin /></ProtectedRoute>} />
 
         <Route path="/" element={<Navigate to="/dashboard" replace />} />

@@ -1,14 +1,18 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 
-import { completeGoogleOAuth } from "@/api/endpoints";
+import { completeGoogleOAuth, completeMicrosoftOAuth } from "@/api/endpoints";
 import { Card } from "@/components/Card";
 import { useAuth } from "@/context/AuthContext";
 
 export default function OAuthCallback() {
   const { user, loading: authLoading, restoreSession } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
+  const location = useLocation();
   const navigate = useNavigate();
+
+  const provider = location.pathname.includes("/oauth/microsoft/") ? "microsoft" : "google";
+  const providerName = provider === "microsoft" ? "Microsoft" : "Google";
 
   const capturedRef = useRef<{ code: string | null; state: string | null; error: string | null } | null>(null);
   const startedRef = useRef(false);
@@ -21,7 +25,7 @@ export default function OAuthCallback() {
     };
   }
 
-  const [statusMessage, setStatusMessage] = useState<string>("Completing Google account linking…");
+  const [statusMessage, setStatusMessage] = useState<string>(`Completing ${providerName} account linking…`);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   // Immediately strip sensitive query parameters from browser history
@@ -44,7 +48,7 @@ export default function OAuthCallback() {
       const activeUser = user ?? (await restoreSession());
       if (!activeUser) {
         setErrorMessage(
-          "Your Infora session has expired or you are not signed in. Please sign in again to link your Google account."
+          `Your Infora session has expired or you are not signed in. Please sign in again to link your ${providerName} account.`
         );
         return;
       }
@@ -52,26 +56,29 @@ export default function OAuthCallback() {
       if (error) {
         setErrorMessage(
           error === "access_denied"
-            ? "Google account linking was cancelled (access denied). No changes were made."
-            : "Google returned an authorization error. Please try again."
+            ? `${providerName} account linking was cancelled (access denied). No changes were made.`
+            : `${providerName} returned an authorization error. Please try again.`
         );
         return;
       }
 
       if (!code || !state) {
-        setErrorMessage("Missing authorization parameters from Google callback. Please try again.");
+        setErrorMessage(`Missing authorization parameters from ${providerName} callback. Please try again.`);
         return;
       }
 
       try {
-        const linked = await completeGoogleOAuth(code, state);
-        setStatusMessage("Google account linked successfully. Redirecting…");
+        const linked =
+          provider === "microsoft"
+            ? await completeMicrosoftOAuth(code, state)
+            : await completeGoogleOAuth(code, state);
+        setStatusMessage(`${providerName} account linked successfully. Redirecting…`);
         navigate("/connected-accounts", {
           replace: true,
           state: {
             oauthSuccess: linked.provider_email
-              ? `Connected Google account (${linked.provider_email}).`
-              : "Google account connected successfully.",
+              ? `Connected ${providerName} account (${linked.provider_email}).`
+              : `${providerName} account connected successfully.`,
           },
         });
       } catch (err: unknown) {
@@ -79,16 +86,16 @@ export default function OAuthCallback() {
         const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
         if (status === 401) {
           setErrorMessage(
-            "Your Infora session has expired. Please sign in again to link your Google account."
+            `Your Infora session has expired. Please sign in again to link your ${providerName} account.`
           );
         } else {
-          setErrorMessage(detail ?? "Could not complete Google account linking. Please try again.");
+          setErrorMessage(detail ?? `Could not complete ${providerName} account linking. Please try again.`);
         }
       }
     }
 
     runCallback();
-  }, [authLoading, navigate, restoreSession, user]);
+  }, [authLoading, navigate, provider, providerName, restoreSession, user]);
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-surface-light p-4 dark:bg-surface">
@@ -96,7 +103,7 @@ export default function OAuthCallback() {
         <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-lg bg-brand-600 text-white font-bold">
           IS
         </div>
-        <h1 className="text-lg font-semibold">Google Account Linking</h1>
+        <h1 className="text-lg font-semibold">{providerName} Account Linking</h1>
 
         {errorMessage ? (
           <div className="space-y-4">
@@ -122,9 +129,7 @@ export default function OAuthCallback() {
             </div>
           </div>
         ) : (
-          <p role="status" className="text-sm text-slate-600 dark:text-slate-300">
-            {statusMessage}
-          </p>
+          <p className="text-sm text-slate-600 dark:text-slate-300">{statusMessage}</p>
         )}
       </Card>
     </div>

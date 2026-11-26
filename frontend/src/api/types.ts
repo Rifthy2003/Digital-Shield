@@ -140,8 +140,13 @@ export interface LogoutAllResponse {
 export interface OAuthProviderInfo {
   provider: string;
   display_name: string;
+  account_type?: string;
   configured: boolean;
   scopes: string[];
+  capabilities?: Record<string, string>;
+  required_permissions?: string[];
+  enterprise_only_restrictions?: string[];
+  limitations?: string[];
 }
 
 export interface OAuthProvidersResponse {

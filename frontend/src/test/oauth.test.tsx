@@ -92,9 +92,9 @@ describe("Connected Accounts & OAuth Callback UI", () => {
     );
 
     expect(screen.getByText("Connected Accounts")).toBeInTheDocument();
-    expect(screen.getByText(/Loading connected accounts/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Loading connected accounts/i).length).toBeGreaterThanOrEqual(1);
     expect(
-      screen.getByText(/Connecting your Google account allows Infora to securely link your account identity/i)
+      screen.getByText(/Connecting your personal accounts allows Infora to securely link your verified account/i)
     ).toBeInTheDocument();
 
     await waitFor(() => {

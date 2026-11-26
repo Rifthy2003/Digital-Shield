@@ -160,12 +160,26 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_SECRET: str | None = None
     GOOGLE_REDIRECT_URI: str | None = None
 
+    # --- Microsoft Personal OAuth / OpenID Connect (P1-C) ---
+    MICROSOFT_CLIENT_ID: str | None = None
+    MICROSOFT_CLIENT_SECRET: str | None = None
+    MICROSOFT_REDIRECT_URI: str | None = None
+    MICROSOFT_AUTHORITY: str = "https://login.microsoftonline.com/consumers"
+
     @property
     def google_oauth_enabled(self) -> bool:
         return bool(
             (self.GOOGLE_CLIENT_ID and self.GOOGLE_CLIENT_ID.strip())
             or (self.GOOGLE_CLIENT_SECRET and self.GOOGLE_CLIENT_SECRET.strip())
             or (self.GOOGLE_REDIRECT_URI and self.GOOGLE_REDIRECT_URI.strip())
+        )
+
+    @property
+    def microsoft_oauth_enabled(self) -> bool:
+        return bool(
+            (self.MICROSOFT_CLIENT_ID and self.MICROSOFT_CLIENT_ID.strip())
+            or (self.MICROSOFT_CLIENT_SECRET and self.MICROSOFT_CLIENT_SECRET.strip())
+            or (self.MICROSOFT_REDIRECT_URI and self.MICROSOFT_REDIRECT_URI.strip())
         )
 
     @model_validator(mode="after")
@@ -183,36 +197,63 @@ class Settings(BaseSettings):
                         "Invalid TOKEN_ENCRYPTION_KEY format; expected urlsafe base64-encoded 32-byte Fernet key(s)."
                     ) from exc
 
-        if not self.google_oauth_enabled:
-            return self
+        if self.google_oauth_enabled:
+            missing = [
+                name
+                for name, val in (
+                    ("GOOGLE_CLIENT_ID", self.GOOGLE_CLIENT_ID),
+                    ("GOOGLE_CLIENT_SECRET", self.GOOGLE_CLIENT_SECRET),
+                    ("GOOGLE_REDIRECT_URI", self.GOOGLE_REDIRECT_URI),
+                )
+                if not val or not val.strip()
+            ]
+            if missing:
+                raise ValueError(
+                    f"Incomplete Google OAuth configuration; missing required setting(s): {', '.join(missing)}."
+                )
 
-        missing = [
-            name
-            for name, val in (
-                ("GOOGLE_CLIENT_ID", self.GOOGLE_CLIENT_ID),
-                ("GOOGLE_CLIENT_SECRET", self.GOOGLE_CLIENT_SECRET),
-                ("GOOGLE_REDIRECT_URI", self.GOOGLE_REDIRECT_URI),
-            )
-            if not val or not val.strip()
-        ]
-        if missing:
-            raise ValueError(
-                f"Incomplete Google OAuth configuration; missing required setting(s): {', '.join(missing)}."
-            )
+            parsed_uri = urlparse(self.GOOGLE_REDIRECT_URI.strip())
+            is_production = self.ENVIRONMENT.strip().lower() == "production"
+            allowed_schemes = {"https"} if is_production else {"http", "https"}
+            if parsed_uri.scheme.lower() not in allowed_schemes or not parsed_uri.netloc:
+                raise ValueError(
+                    "GOOGLE_REDIRECT_URI must be a valid absolute URL"
+                    + (" using https in production." if is_production else " (http or https).")
+                )
 
-        parsed_uri = urlparse(self.GOOGLE_REDIRECT_URI.strip())
-        is_production = self.ENVIRONMENT.strip().lower() == "production"
-        allowed_schemes = {"https"} if is_production else {"http", "https"}
-        if parsed_uri.scheme.lower() not in allowed_schemes or not parsed_uri.netloc:
-            raise ValueError(
-                "GOOGLE_REDIRECT_URI must be a valid absolute URL"
-                + (" using https in production." if is_production else " (http or https).")
-            )
+            if not raw_enc_key or not raw_enc_key.strip():
+                raise ValueError(
+                    "TOKEN_ENCRYPTION_KEY must be configured when OAuth is enabled."
+                )
 
-        if not raw_enc_key or not raw_enc_key.strip():
-            raise ValueError(
-                "TOKEN_ENCRYPTION_KEY must be configured when OAuth is enabled."
-            )
+        if self.microsoft_oauth_enabled:
+            missing_ms = [
+                name
+                for name, val in (
+                    ("MICROSOFT_CLIENT_ID", self.MICROSOFT_CLIENT_ID),
+                    ("MICROSOFT_CLIENT_SECRET", self.MICROSOFT_CLIENT_SECRET),
+                    ("MICROSOFT_REDIRECT_URI", self.MICROSOFT_REDIRECT_URI),
+                )
+                if not val or not val.strip()
+            ]
+            if missing_ms:
+                raise ValueError(
+                    f"Incomplete Microsoft OAuth configuration; missing required setting(s): {', '.join(missing_ms)}."
+                )
+
+            parsed_ms_uri = urlparse(self.MICROSOFT_REDIRECT_URI.strip())
+            is_production = self.ENVIRONMENT.strip().lower() == "production"
+            allowed_schemes = {"https"} if is_production else {"http", "https"}
+            if parsed_ms_uri.scheme.lower() not in allowed_schemes or not parsed_ms_uri.netloc:
+                raise ValueError(
+                    "MICROSOFT_REDIRECT_URI must be a valid absolute URL"
+                    + (" using https in production." if is_production else " (http or https).")
+                )
+
+            if not raw_enc_key or not raw_enc_key.strip():
+                raise ValueError(
+                    "TOKEN_ENCRYPTION_KEY must be configured when OAuth is enabled."
+                )
 
         return self
 
