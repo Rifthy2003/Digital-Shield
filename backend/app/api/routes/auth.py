@@ -42,6 +42,7 @@ from app.schemas.auth import (
 )
 from app.services.mfa import (
     build_provisioning_uri,
+    claim_totp_step,
     consume_mfa_challenge,
     consume_recovery_code,
     count_remaining_recovery_codes,
@@ -445,6 +446,7 @@ def start_mfa_enrollment(request: Request, user: CurrentUser, db: Session = Depe
         ) from exc
 
     user.mfa_pending_secret_encrypted = encrypted_secret
+    user.mfa_pending_expires_at = datetime.utcnow() + timedelta(minutes=settings.MFA_PENDING_EXPIRE_MINUTES)
     db.commit()
 
     record_audit_event(db, actor_id=user.id, action="mfa.enrollment_started", resource=user.id, request=request)
@@ -454,6 +456,16 @@ def start_mfa_enrollment(request: Request, user: CurrentUser, db: Session = Depe
         issuer=settings.MFA_ISSUER_NAME,
         account_name=user.email,
     )
+
+
+@router.post("/mfa/enroll/cancel", status_code=status.HTTP_204_NO_CONTENT)
+def cancel_mfa_enrollment(request: Request, user: CurrentUser, db: Session = Depends(get_db)):
+    """Clear any abandoned pending TOTP MFA enrollment for the authenticated user."""
+    if user.mfa_pending_secret_encrypted or user.mfa_pending_expires_at:
+        user.mfa_pending_secret_encrypted = None
+        user.mfa_pending_expires_at = None
+        db.commit()
+        record_audit_event(db, actor_id=user.id, action="mfa.enrollment_cancelled", resource=user.id, request=request)
 
 
 @router.post("/mfa/enroll/verify", response_model=MfaEnrollVerifyResponse)
@@ -475,6 +487,14 @@ def verify_mfa_enrollment(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No pending MFA enrollment found. Start enrollment first.",
         )
+    if user.mfa_pending_expires_at and user.mfa_pending_expires_at <= datetime.utcnow():
+        user.mfa_pending_secret_encrypted = None
+        user.mfa_pending_expires_at = None
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Pending MFA enrollment has expired. Start enrollment again.",
+        )
 
     try:
         secret = decrypt_totp_secret(user.mfa_pending_secret_encrypted)
@@ -494,6 +514,7 @@ def verify_mfa_enrollment(
 
     user.mfa_secret_encrypted = user.mfa_pending_secret_encrypted
     user.mfa_pending_secret_encrypted = None
+    user.mfa_pending_expires_at = None
     user.mfa_enabled = True
     user.mfa_last_totp_step = matched_step
     recovery_codes = replace_recovery_codes(db, user.id)
@@ -553,7 +574,7 @@ def verify_mfa_login(
 
     if re.fullmatch(r"\d{6}", cleaned_code):
         matched_step = verify_totp_code(secret, cleaned_code, last_totp_step=user.mfa_last_totp_step)
-        if matched_step is not None:
+        if matched_step is not None and claim_totp_step(db, user.id, matched_step):
             verified_method = "totp"
     else:
         if consume_recovery_code(db, user.id, cleaned_code):
@@ -569,8 +590,6 @@ def verify_mfa_login(
         db.rollback()
         raise generic_error
 
-    if matched_step is not None:
-        user.mfa_last_totp_step = matched_step
     user.last_login_at = datetime.utcnow()
 
     tokens = _issue_session_tokens(db, user, request)
@@ -603,6 +622,9 @@ def regenerate_recovery_codes(
         )
 
     if not verify_password(payload.current_password, user.password_hash):
+        record_audit_event(
+            db, actor_id=user.id, action="mfa.recovery_codes_regenerate_failed", resource=user.id, request=request
+        )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     try:
@@ -614,10 +636,13 @@ def regenerate_recovery_codes(
         ) from exc
 
     matched_step = verify_totp_code(secret, payload.code, last_totp_step=user.mfa_last_totp_step)
-    if matched_step is None:
+    if matched_step is None or not claim_totp_step(db, user.id, matched_step):
+        db.rollback()
+        record_audit_event(
+            db, actor_id=user.id, action="mfa.recovery_codes_regenerate_failed", resource=user.id, request=request
+        )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid verification code")
 
-    user.mfa_last_totp_step = matched_step
     codes = replace_recovery_codes(db, user.id)
     db.commit()
 
@@ -647,6 +672,7 @@ def disable_mfa(
         )
 
     if not verify_password(payload.current_password, user.password_hash):
+        record_audit_event(db, actor_id=user.id, action="mfa.disable_failed", resource=user.id, request=request)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     try:
@@ -660,18 +686,21 @@ def disable_mfa(
     cleaned_code = payload.code.strip()
     verified = False
     if re.fullmatch(r"\d{6}", cleaned_code):
-        if verify_totp_code(secret, cleaned_code, last_totp_step=user.mfa_last_totp_step) is not None:
+        matched_step = verify_totp_code(secret, cleaned_code, last_totp_step=user.mfa_last_totp_step)
+        if matched_step is not None and claim_totp_step(db, user.id, matched_step):
             verified = True
     elif consume_recovery_code(db, user.id, cleaned_code):
         verified = True
 
     if not verified:
         db.rollback()
+        record_audit_event(db, actor_id=user.id, action="mfa.disable_failed", resource=user.id, request=request)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid verification code")
 
     user.mfa_enabled = False
     user.mfa_secret_encrypted = None
     user.mfa_pending_secret_encrypted = None
+    user.mfa_pending_expires_at = None
     user.mfa_last_totp_step = None
     db.execute(delete(MfaRecoveryCode).where(MfaRecoveryCode.user_id == user.id))
     db.execute(delete(MfaChallenge).where(MfaChallenge.user_id == user.id))

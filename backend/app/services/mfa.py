@@ -6,7 +6,7 @@ Security properties:
 - Secrets are encrypted at rest using TokenCipher (Fernet/MultiFernet) and
   never stored or logged in plaintext.
 - TOTP verification enforces a configurable clock-skew window and prevents
-  replay attacks by tracking the last accepted 30-second time step per user.
+  replay attacks by atomically claiming the matched 30-second time step per user.
 - Recovery codes use an unambiguous 32-character alphabet (50 bits of entropy),
   are stored strictly as SHA-256 hashes, and are consumed atomically once.
 - MFA login challenges are short-lived, single-use, purpose-bound tokens.
@@ -20,13 +20,14 @@ import time
 from datetime import datetime, timedelta
 
 import pyotp
-from sqlalchemy import delete, update
+from sqlalchemy import delete, or_, update
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.core.crypto import get_token_cipher
 from app.core.security import hash_token
 from app.models.mfa import MfaChallenge, MfaRecoveryCode
+from app.models.user import User
 
 _RECOVERY_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 _TOTP_STEP_SECONDS = 30
@@ -90,6 +91,25 @@ def verify_totp_code(
             return step
 
     return None
+
+
+def claim_totp_step(db: Session, user_id: str, matched_step: int) -> bool:
+    """
+    Atomically claim `matched_step` for `user_id` to prevent concurrent TOTP replay.
+
+    Executes a conditional UPDATE that succeeds only if `mfa_last_totp_step` is
+    NULL or strictly less than `matched_step`.
+    """
+    result = db.execute(
+        update(User)
+        .where(
+            User.id == user_id,
+            User.mfa_enabled.is_(True),
+            or_(User.mfa_last_totp_step.is_(None), User.mfa_last_totp_step < matched_step),
+        )
+        .values(mfa_last_totp_step=matched_step)
+    )
+    return (result.rowcount or 0) == 1
 
 
 def generate_recovery_codes(count: int | None = None) -> list[str]:

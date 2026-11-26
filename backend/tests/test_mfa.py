@@ -253,3 +253,188 @@ def test_mfa_login_verify_is_rate_limited(client, mfa_encryption_key):
         r = client.post("/api/v1/auth/mfa/login-verify", json={"challenge_token": challenge, "code": "000000"})
         statuses.append(r.status_code)
     assert 429 in statuses
+
+
+def test_challenge_cannot_be_used_as_access_token_or_across_users(client, db_session, mfa_encryption_key):
+    access_a, _ = _register_and_login(client, email="alice@example.com")
+    start_a = client.post("/api/v1/auth/mfa/enroll/start", headers=_auth_headers(access_a)).json()
+    totp_a = pyotp.TOTP(start_a["secret"])
+    client.post("/api/v1/auth/mfa/enroll/verify", json={"code": totp_a.now()}, headers=_auth_headers(access_a))
+
+    access_b, _ = _register_and_login(client, email="bob@example.com")
+    start_b = client.post("/api/v1/auth/mfa/enroll/start", headers=_auth_headers(access_b)).json()
+    totp_b = pyotp.TOTP(start_b["secret"])
+    client.post("/api/v1/auth/mfa/enroll/verify", json={"code": totp_b.now()}, headers=_auth_headers(access_b))
+
+    alice = db_session.query(User).filter(User.email == "alice@example.com").first()
+    sessions_before = db_session.query(UserSession).filter(UserSession.user_id == alice.id).count()
+
+    # Alice logs in -> gets challenge; no new UserSession created yet
+    ch_a = client.post(
+        "/api/v1/auth/login",
+        json={"email": "alice@example.com", "password": "StrongPassword123!"},
+    ).json()["mfa_challenge_token"]
+    sessions_pending = db_session.query(UserSession).filter(UserSession.user_id == alice.id).count()
+    assert sessions_pending == sessions_before
+
+    # Challenge token is purpose-bound and cannot be used as Bearer JWT
+    assert client.get("/api/v1/auth/me", headers=_auth_headers(ch_a)).status_code == 401
+    assert client.get("/api/v1/dashboard", headers=_auth_headers(ch_a)).status_code == 401
+
+    # Bob's TOTP code cannot satisfy Alice's challenge
+    cross_user = client.post(
+        "/api/v1/auth/mfa/login-verify",
+        json={"challenge_token": ch_a, "code": totp_b.at(datetime.utcnow() + timedelta(seconds=30))},
+    )
+    assert cross_user.status_code == 401
+
+
+def test_atomic_totp_replay_and_recovery_code_concurrency(client, db_session, mfa_encryption_key):
+    from concurrent.futures import ThreadPoolExecutor
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from app.services.mfa import claim_totp_step, consume_recovery_code
+
+    access, _ = _register_and_login(client, email="concurrent@example.com")
+    start = client.post("/api/v1/auth/mfa/enroll/start", headers=_auth_headers(access)).json()
+    totp = pyotp.TOTP(start["secret"])
+    enroll_body = client.post(
+        "/api/v1/auth/mfa/enroll/verify",
+        json={"code": totp.now()},
+        headers=_auth_headers(access),
+    ).json()
+
+    user = db_session.query(User).filter(User.email == "concurrent@example.com").first()
+    target_step = (user.mfa_last_totp_step or 0) + 1
+    rc_to_race = enroll_body["recovery_codes"][0]
+
+    # Issue two separate login challenges and race the same TOTP step across two independent sessions
+    c1 = client.post(
+        "/api/v1/auth/login",
+        json={"email": "concurrent@example.com", "password": "StrongPassword123!"},
+    ).json()["mfa_challenge_token"]
+    c2 = client.post(
+        "/api/v1/auth/login",
+        json={"email": "concurrent@example.com", "password": "StrongPassword123!"},
+    ).json()["mfa_challenge_token"]
+
+    next_code = totp.at(datetime.utcnow() + timedelta(seconds=30))
+    r1 = client.post("/api/v1/auth/mfa/login-verify", json={"challenge_token": c1, "code": next_code})
+    r2 = client.post("/api/v1/auth/mfa/login-verify", json={"challenge_token": c2, "code": next_code})
+    assert sorted([r1.status_code, r2.status_code]) == [200, 401]
+
+    # Direct DB-level concurrent claim_totp_step & consume_recovery_code against SQLite file DB
+    engine = db_session.get_bind()
+    SessionFactory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    race_step = target_step + 5
+
+    def _race_claim(_):
+        s = SessionFactory()
+        try:
+            won = claim_totp_step(s, user.id, race_step)
+            s.commit()
+            return won
+        except Exception:
+            s.rollback()
+            return False
+        finally:
+            s.close()
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        claim_results = list(pool.map(_race_claim, range(4)))
+    assert claim_results.count(True) == 1
+
+    def _race_recovery(_):
+        s = SessionFactory()
+        try:
+            won = consume_recovery_code(s, user.id, rc_to_race)
+            s.commit()
+            return won
+        except Exception:
+            s.rollback()
+            return False
+        finally:
+            s.close()
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        rc_results = list(pool.map(_race_recovery, range(4)))
+    assert rc_results.count(True) == 1
+
+
+def test_pending_enrollment_expiration_cancel_and_isolation(client, db_session, mfa_encryption_key):
+    access_a, _ = _register_and_login(client, email="pending_a@example.com")
+    access_b, _ = _register_and_login(client, email="pending_b@example.com")
+
+    start_a = client.post("/api/v1/auth/mfa/enroll/start", headers=_auth_headers(access_a)).json()
+    totp_a = pyotp.TOTP(start_a["secret"])
+
+    # User B cannot verify User A's pending secret
+    b_verify = client.post(
+        "/api/v1/auth/mfa/enroll/verify",
+        json={"code": totp_a.now()},
+        headers=_auth_headers(access_b),
+    )
+    assert b_verify.status_code == 400
+
+    # Cancel clears pending enrollment
+    assert client.post("/api/v1/auth/mfa/enroll/cancel", headers=_auth_headers(access_a)).status_code == 204
+    user_a = db_session.query(User).filter(User.email == "pending_a@example.com").first()
+    assert user_a.mfa_pending_secret_encrypted is None
+    assert user_a.mfa_pending_expires_at is None
+
+    # Expired pending enrollment is rejected and cleared
+    start_a2 = client.post("/api/v1/auth/mfa/enroll/start", headers=_auth_headers(access_a)).json()
+    db_session.refresh(user_a)
+    user_a.mfa_pending_expires_at = datetime.utcnow() - timedelta(minutes=1)
+    db_session.commit()
+
+    expired_verify = client.post(
+        "/api/v1/auth/mfa/enroll/verify",
+        json={"code": pyotp.TOTP(start_a2["secret"]).now()},
+        headers=_auth_headers(access_a),
+    )
+    assert expired_verify.status_code == 400
+    db_session.refresh(user_a)
+    assert user_a.mfa_pending_secret_encrypted is None
+    assert user_a.mfa_enabled is False
+
+
+def test_disable_revokes_other_refresh_tokens_and_audit_logs_never_leak_secrets(client, db_session, mfa_encryption_key):
+    access1, refresh1 = _register_and_login(client, email="audit@example.com")
+    login2 = client.post(
+        "/api/v1/auth/login",
+        json={"email": "audit@example.com", "password": "StrongPassword123!"},
+    ).json()
+    refresh2 = login2["refresh_token"]
+
+    start = client.post("/api/v1/auth/mfa/enroll/start", headers=_auth_headers(access1)).json()
+    totp = pyotp.TOTP(start["secret"])
+    enroll_code = totp.now()
+    enroll_body = client.post(
+        "/api/v1/auth/mfa/enroll/verify",
+        json={"code": enroll_code},
+        headers=_auth_headers(access1),
+    ).json()
+    rc = enroll_body["recovery_codes"][0]
+
+    # Disable using recovery code
+    disable_res = client.post(
+        "/api/v1/auth/mfa/disable",
+        json={"current_password": "StrongPassword123!", "code": rc},
+        headers=_auth_headers(access1),
+    )
+    assert disable_res.status_code == 200
+
+    # Revoked session's refresh token cannot be used
+    assert client.post("/api/v1/auth/refresh", json={"refresh_token": refresh2}).status_code == 401
+    # Current session's refresh token remains valid
+    assert client.post("/api/v1/auth/refresh", json={"refresh_token": refresh1}).status_code == 200
+
+    # Audit logs must never contain plaintext secret, TOTP code, or recovery codes
+    logs = db_session.query(AuditLog).all()
+    serialized = str([(l.action, l.details) for l in logs])
+    assert start["secret"] not in serialized
+    assert enroll_code not in serialized
+    for code in enroll_body["recovery_codes"]:
+        assert code not in serialized
+

@@ -41,6 +41,7 @@ class User(Base):
     mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     mfa_secret_encrypted: Mapped[str | None] = mapped_column(String(255), nullable=True)
     mfa_pending_secret_encrypted: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    mfa_pending_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     mfa_last_totp_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     failed_login_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

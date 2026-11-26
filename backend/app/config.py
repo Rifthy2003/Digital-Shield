@@ -82,6 +82,7 @@ class Settings(BaseSettings):
     MFA_ISSUER_NAME: str = "Infora Digital Shield"
     MFA_TOTP_WINDOW: int = 1  # +/- 1 step (30s) clock skew tolerance
     MFA_CHALLENGE_EXPIRE_MINUTES: int = 5
+    MFA_PENDING_EXPIRE_MINUTES: int = 10
     MFA_RECOVERY_CODE_COUNT: int = 8
 
     @model_validator(mode="after")
