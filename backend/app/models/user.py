@@ -9,7 +9,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
 if TYPE_CHECKING:
+    from app.models.mfa import MfaChallenge, MfaRecoveryCode
     from app.models.oauth import ConnectedAccount, OAuthState
+    from app.models.organization import OrganizationMembership
 
 
 class UserRole(str, enum.Enum):
@@ -38,6 +40,8 @@ class User(Base):
     is_email_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     mfa_secret_encrypted: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    mfa_pending_secret_encrypted: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    mfa_last_totp_step: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     failed_login_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     locked_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -57,7 +61,16 @@ class User(Base):
     oauth_states: Mapped[list["OAuthState"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    mfa_recovery_codes: Mapped[list["MfaRecoveryCode"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    mfa_challenges: Mapped[list["MfaChallenge"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
     connected_accounts: Mapped[list["ConnectedAccount"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    organization_memberships: Mapped[list["OrganizationMembership"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
 

@@ -78,6 +78,12 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
+    # --- MFA (TOTP) ---
+    MFA_ISSUER_NAME: str = "Infora Digital Shield"
+    MFA_TOTP_WINDOW: int = 1  # +/- 1 step (30s) clock skew tolerance
+    MFA_CHALLENGE_EXPIRE_MINUTES: int = 5
+    MFA_RECOVERY_CODE_COUNT: int = 8
+
     @model_validator(mode="after")
     def validate_jwt_secret_key(self) -> "Settings":
         raw_secret = self.JWT_SECRET_KEY

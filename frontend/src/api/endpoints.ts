@@ -4,11 +4,19 @@ import type {
   Alert,
   AssistantResponse,
   BreachCheckResult,
+  ConnectedAccount,
   DashboardData,
+  DisconnectAccountResponse,
   IncidentReport,
   LogoutAllResponse,
   MessageCheckResult,
-  PasswordStrengthResult,
+  MfaDisableResponse,
+  MfaEnrollStartResponse,
+  MfaEnrollVerifyResponse,
+  MfaRecoveryCodesResponse,
+  MfaStatus,
+  OAuthAuthorizeResponse,
+  OAuthProvidersResponse,
   TokenPair,
   UrlCheckResult,
   User,
@@ -33,6 +41,24 @@ export const revokeSession = (sessionId: string) =>
 export const logoutAllOtherSessions = () =>
   api.post<LogoutAllResponse>("/auth/logout-all").then((r) => r.data);
 
+export const fetchMfaStatus = () =>
+  api.get<MfaStatus>("/auth/mfa/status").then((r) => r.data);
+
+export const startMfaEnrollment = () =>
+  api.post<MfaEnrollStartResponse>("/auth/mfa/enroll/start").then((r) => r.data);
+
+export const verifyMfaEnrollment = (code: string) =>
+  api.post<MfaEnrollVerifyResponse>("/auth/mfa/enroll/verify", { code }).then((r) => r.data);
+
+export const verifyMfaLogin = (data: { challenge_token: string; code: string }) =>
+  api.post<TokenPair>("/auth/mfa/login-verify", data).then((r) => r.data);
+
+export const regenerateMfaRecoveryCodes = (data: { current_password: string; code: string }) =>
+  api.post<MfaRecoveryCodesResponse>("/auth/mfa/recovery-codes/regenerate", data).then((r) => r.data);
+
+export const disableMfa = (data: { current_password: string; code: string }) =>
+  api.post<MfaDisableResponse>("/auth/mfa/disable", data).then((r) => r.data);
+
 // --- Dashboard ---
 export const fetchDashboard = () => api.get<DashboardData>("/dashboard").then((r) => r.data);
 
@@ -47,10 +73,6 @@ export const checkMessage = (content: string) =>
 // --- Breach Checker ---
 export const checkBreach = (email: string) =>
   api.post<BreachCheckResult>("/breach-checker/check", { email }).then((r) => r.data);
-
-// --- Password Health ---
-export const checkPasswordStrength = (password: string) =>
-  api.post<PasswordStrengthResult>("/password-health/strength", { password }).then((r) => r.data);
 
 // --- Alerts ---
 export const fetchAlerts = () => api.get<Alert[]>("/alerts").then((r) => r.data);
@@ -75,3 +97,19 @@ export interface AdminStats {
 }
 export const fetchAdminStats = () => api.get<AdminStats>("/admin/stats").then((r) => r.data);
 export const fetchAllIncidents = () => api.get<IncidentReport[]>("/admin/incidents").then((r) => r.data);
+
+// --- OAuth & Connected Accounts ---
+export const fetchOAuthProviders = () =>
+  api.get<OAuthProvidersResponse>("/oauth/providers").then((r) => r.data.providers);
+
+export const fetchConnectedAccounts = () =>
+  api.get<ConnectedAccount[]>("/oauth/accounts").then((r) => r.data);
+
+export const startGoogleOAuth = () =>
+  api.post<OAuthAuthorizeResponse>("/oauth/google/authorize").then((r) => r.data);
+
+export const completeGoogleOAuth = (code: string, state: string) =>
+  api.post<ConnectedAccount>("/oauth/google/callback", { code, state }).then((r) => r.data);
+
+export const disconnectConnectedAccount = (accountId: string) =>
+  api.delete<DisconnectAccountResponse>(`/oauth/accounts/${accountId}`).then((r) => r.data);

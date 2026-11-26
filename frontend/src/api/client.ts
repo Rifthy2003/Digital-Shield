@@ -51,17 +51,32 @@ function processQueue(error: any, token: string | null = null) {
   failedQueue = [];
 }
 
+let inFlightRefresh: Promise<string> | null = null;
+
 export async function refreshAccessToken(): Promise<string> {
+  if (inFlightRefresh) {
+    return inFlightRefresh;
+  }
+
   const refreshToken = getRefreshToken();
   if (!refreshToken) {
     throw new Error("No refresh token available");
   }
 
   // Use standalone axios instance to bypass request/response interceptor loops
-  const resp = await axios.post(`${API_BASE_URL}/auth/refresh`, { refresh_token: refreshToken });
-  const { access_token, refresh_token } = resp.data;
-  setTokens(access_token, refresh_token);
-  return access_token as string;
+  // and deduplicate concurrent refresh calls so rotating tokens never collide.
+  inFlightRefresh = axios
+    .post(`${API_BASE_URL}/auth/refresh`, { refresh_token: refreshToken })
+    .then((resp) => {
+      const { access_token, refresh_token } = resp.data;
+      setTokens(access_token, refresh_token);
+      return access_token as string;
+    })
+    .finally(() => {
+      inFlightRefresh = null;
+    });
+
+  return inFlightRefresh;
 }
 
 api.interceptors.response.use(

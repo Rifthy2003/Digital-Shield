@@ -63,12 +63,13 @@ async def check_breach(request: Request, payload: BreachCheckRequest, user: Curr
     )
 
 
-@router.post("/password-health/strength", response_model=PasswordStrengthResponse)
+@router.post("/password-health/strength", response_model=PasswordStrengthResponse, deprecated=True)
 @limiter.limit("30/minute")
 def check_password_strength(request: Request, payload: PasswordStrengthRequest):
     """
-    Stateless by design: the password is analyzed in-memory for this one
-    request and is never stored, logged, or echoed back.
+    Deprecated for web clients (P1-A): password strength is now evaluated
+    100% locally in the browser. Retained for backward API compatibility only;
+    stateless in-memory analysis, never stored or logged.
     """
     result = analyze_password_strength(payload.password)
     return PasswordStrengthResponse(

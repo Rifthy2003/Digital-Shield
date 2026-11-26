@@ -1,15 +1,23 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 
-import { fetchCurrentUser, loginUser, logoutUser, registerUser } from "@/api/endpoints";
+import { fetchCurrentUser, loginUser, logoutUser, registerUser, verifyMfaLogin } from "@/api/endpoints";
 import { clearTokens, getAccessToken, getRefreshToken, refreshAccessToken, setTokens } from "@/api/client";
 import type { User } from "@/api/types";
+
+export interface LoginResult {
+  mfaRequired: boolean;
+  challengeToken?: string;
+}
 
 interface AuthContextValue {
   user: User | null;
   loading: boolean;
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<LoginResult>;
+  completeMfaLogin: (challengeToken: string, code: string) => Promise<void>;
   register: (email: string, password: string, fullName?: string) => Promise<void>;
   logout: () => Promise<void>;
+  restoreSession: () => Promise<User | null>;
+  refreshUser: () => Promise<User | null>;
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
@@ -18,45 +26,53 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
+  async function restoreSession(): Promise<User | null> {
+    const refreshToken = getRefreshToken();
+    if (!refreshToken) {
+      clearTokens();
+      setUser(null);
+      return null;
+    }
+
+    try {
+      let accessToken = getAccessToken();
+      if (!accessToken) {
+        accessToken = await refreshAccessToken();
+      }
+      if (!accessToken) {
+        clearTokens();
+        setUser(null);
+        return null;
+      }
+      // fetchCurrentUser automatically refreshes once via Axios 401 interceptor if expired.
+      const me = await fetchCurrentUser();
+      setUser(me);
+      return me;
+    } catch {
+      clearTokens();
+      setUser(null);
+      return null;
+    }
+  }
+
   useEffect(() => {
     let isMounted = true;
 
     async function recoverSession() {
       const refreshToken = getRefreshToken();
-
-      // If there is no refresh token, the user has no persistent session
       if (!refreshToken) {
         if (isMounted) setLoading(false);
         return;
       }
 
       try {
-        const accessToken = getAccessToken();
-        // If we have an access token, try to fetch current user
-        if (accessToken) {
-          try {
-            const me = await fetchCurrentUser();
-            if (isMounted) {
-              setUser(me);
-              setLoading(false);
-              return;
-            }
-          } catch {
-            // Access token expired; fall through to refresh
-          }
+        let accessToken = getAccessToken();
+        if (!accessToken) {
+          accessToken = await refreshAccessToken();
         }
-
-        // If access token was missing or expired, refresh it
-        const newToken = await refreshAccessToken();
-        if (newToken) {
-          const me = await fetchCurrentUser();
-          if (isMounted) setUser(me);
-        } else {
-          clearTokens();
-          if (isMounted) setUser(null);
-        }
+        const me = await fetchCurrentUser();
+        if (isMounted) setUser(me);
       } catch {
-        // Refresh token expired or session revoked on server
         clearTokens();
         if (isMounted) setUser(null);
       } finally {
@@ -71,11 +87,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  async function login(email: string, password: string) {
+  async function login(email: string, password: string): Promise<LoginResult> {
     const tokens = await loginUser({ email, password });
+    if (tokens.mfa_required && tokens.mfa_challenge_token) {
+      return { mfaRequired: true, challengeToken: tokens.mfa_challenge_token };
+    }
+    if (!tokens.access_token || !tokens.refresh_token) {
+      throw new Error("Incomplete authentication response");
+    }
     setTokens(tokens.access_token, tokens.refresh_token);
     const me = await fetchCurrentUser();
     setUser(me);
+    return { mfaRequired: false };
+  }
+
+  async function completeMfaLogin(challengeToken: string, code: string) {
+    const tokens = await verifyMfaLogin({ challenge_token: challengeToken, code });
+    if (!tokens.access_token || !tokens.refresh_token) {
+      throw new Error("Incomplete MFA verification response");
+    }
+    setTokens(tokens.access_token, tokens.refresh_token);
+    const me = await fetchCurrentUser();
+    setUser(me);
+  }
+
+  async function refreshUser(): Promise<User | null> {
+    try {
+      const me = await fetchCurrentUser();
+      setUser(me);
+      return me;
+    } catch {
+      return null;
+    }
   }
 
   async function register(email: string, password: string, fullName?: string) {
@@ -96,7 +139,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout }}>
+    <AuthContext.Provider value={{ user, loading, login, completeMfaLogin, register, logout, restoreSession, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );

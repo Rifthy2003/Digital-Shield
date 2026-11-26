@@ -8,9 +8,38 @@ export interface User {
 }
 
 export interface TokenPair {
-  access_token: string;
-  refresh_token: string;
+  access_token: string | null;
+  refresh_token: string | null;
   token_type: string;
+  mfa_required?: boolean;
+  mfa_challenge_token?: string | null;
+}
+
+export interface MfaStatus {
+  mfa_enabled: boolean;
+  recovery_codes_remaining: number;
+}
+
+export interface MfaEnrollStartResponse {
+  provisioning_uri: string;
+  secret: string;
+  issuer: string;
+  account_name: string;
+}
+
+export interface MfaEnrollVerifyResponse {
+  mfa_enabled: boolean;
+  recovery_codes: string[];
+}
+
+export interface MfaRecoveryCodesResponse {
+  recovery_codes: string[];
+}
+
+export interface MfaDisableResponse {
+  mfa_enabled: boolean;
+  revoked_sessions_count: number;
+  message: string;
 }
 
 export interface Indicator {
@@ -106,4 +135,41 @@ export interface ActiveSession {
 export interface LogoutAllResponse {
   message: string;
   revoked_sessions_count: number;
+}
+
+export interface OAuthProviderInfo {
+  provider: string;
+  display_name: string;
+  configured: boolean;
+  scopes: string[];
+}
+
+export interface OAuthProvidersResponse {
+  providers: OAuthProviderInfo[];
+}
+
+export interface ConnectedAccount {
+  id: string;
+  provider: string;
+  provider_email: string | null;
+  provider_email_verified: boolean;
+  display_name: string | null;
+  avatar_url: string | null;
+  scopes: string[];
+  status: string;
+  created_at: string;
+  updated_at: string;
+  last_synced_at: string | null;
+}
+
+export interface OAuthAuthorizeResponse {
+  provider: string;
+  authorization_url: string;
+  expires_at: string;
+}
+
+export interface DisconnectAccountResponse {
+  message: string;
+  disconnected_account_id: string;
+  upstream_revocation_status: string;
 }

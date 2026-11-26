@@ -283,7 +283,11 @@ def test_alembic_migration_upgrade_and_downgrade(tmp_path, monkeypatch):
         from app.database import Base
         Base.metadata.create_all(
             bind=engine,
-            tables=[t for name, t in Base.metadata.tables.items() if name not in {"oauth_states", "connected_accounts", "oauth_tokens"}],
+            tables=[
+                t
+                for name, t in Base.metadata.tables.items()
+                if name not in {"oauth_states", "connected_accounts", "oauth_tokens", "organizations", "organization_memberships"}
+            ],
         )
         command.stamp(alembic_cfg, "f18487bc8773")
 

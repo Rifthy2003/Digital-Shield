@@ -1,5 +1,6 @@
 import { useAuth } from "@/context/AuthContext";
 import { Card } from "@/components/Card";
+import { MfaSettings } from "@/components/MfaSettings";
 import { SessionManager } from "@/components/SessionManager";
 
 export default function Profile() {
@@ -25,16 +26,13 @@ export default function Profile() {
         </div>
         <div className="flex items-center justify-between">
           <div>
-            <p className="text-xs text-slate-500">Multi-factor authentication</p>
+            <p className="text-xs text-slate-500">Multi-factor authentication (Infora account)</p>
             <p className="font-medium">{user.mfa_enabled ? "Enabled" : "Not enabled"}</p>
           </div>
-          {!user.mfa_enabled && (
-            <span className="rounded-full bg-risk-medium/10 px-3 py-1 text-xs font-medium text-risk-medium">
-              MFA setup coming soon
-            </span>
-          )}
         </div>
       </Card>
+
+      <MfaSettings />
 
       <SessionManager />
 

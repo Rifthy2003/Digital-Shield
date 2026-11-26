@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.core.security import decode_access_token
 from app.database import get_db
+from app.models.organization import OrganizationMembership, OrganizationRole
 from app.models.user import User, UserRole, UserSession
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -98,3 +99,51 @@ def require_admin(user: CurrentUser) -> User:
 
 
 AdminUser = Annotated[User, Depends(require_admin)]
+
+
+def require_org_member(
+    organization_id: str,
+    user: CurrentUser,
+    db: Annotated[Session, Depends(get_db)],
+) -> OrganizationMembership:
+    """
+    Enforce strict tenant isolation: the authenticated user must have an active
+    membership in an active `organization_id`. Returns 404 otherwise to prevent
+    tenant enumeration / IDOR.
+    """
+    membership = (
+        db.query(OrganizationMembership)
+        .filter(
+            OrganizationMembership.organization_id == organization_id,
+            OrganizationMembership.user_id == user.id,
+            OrganizationMembership.is_active.is_(True),
+        )
+        .options(joinedload(OrganizationMembership.organization))
+        .first()
+    )
+    if (
+        membership is None
+        or membership.organization is None
+        or not membership.organization.is_active
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found",
+        )
+    return membership
+
+
+OrgMember = Annotated[OrganizationMembership, Depends(require_org_member)]
+
+
+def require_org_admin(membership: OrgMember) -> OrganizationMembership:
+    """Require `org_admin` role within the verified organization membership."""
+    if membership.role != OrganizationRole.ORG_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Organization administrator access required",
+        )
+    return membership
+
+
+OrgAdmin = Annotated[OrganizationMembership, Depends(require_org_admin)]

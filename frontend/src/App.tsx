@@ -16,6 +16,8 @@ import Assistant from "@/pages/Assistant";
 import Emergency from "@/pages/Emergency";
 import Profile from "@/pages/Profile";
 import Admin from "@/pages/Admin";
+import ConnectedAccounts from "@/pages/ConnectedAccounts";
+import OAuthCallback from "@/pages/OAuthCallback";
 
 export default function App() {
   return (
@@ -34,6 +36,8 @@ export default function App() {
         <Route path="/assistant" element={<ProtectedRoute><Assistant /></ProtectedRoute>} />
         <Route path="/emergency" element={<ProtectedRoute><Emergency /></ProtectedRoute>} />
         <Route path="/profile" element={<ProtectedRoute><Profile /></ProtectedRoute>} />
+        <Route path="/connected-accounts" element={<ProtectedRoute><ConnectedAccounts /></ProtectedRoute>} />
+        <Route path="/oauth/google/callback" element={<OAuthCallback />} />
         <Route path="/admin" element={<ProtectedRoute adminOnly><Admin /></ProtectedRoute>} />
 
         <Route path="/" element={<Navigate to="/dashboard" replace />} />

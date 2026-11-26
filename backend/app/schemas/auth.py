@@ -33,9 +33,57 @@ class LoginRequest(BaseModel):
 
 
 class TokenResponse(BaseModel):
-    access_token: str
-    refresh_token: str
+    access_token: str | None = None
+    refresh_token: str | None = None
     token_type: str = "bearer"
+    mfa_required: bool = False
+    mfa_challenge_token: str | None = None
+
+
+class MfaStatusResponse(BaseModel):
+    mfa_enabled: bool
+    recovery_codes_remaining: int
+
+
+class MfaEnrollStartResponse(BaseModel):
+    provisioning_uri: str
+    secret: str
+    issuer: str
+    account_name: str
+
+
+class MfaCodeRequest(BaseModel):
+    code: str = Field(..., min_length=6, max_length=64)
+
+
+class MfaEnrollVerifyResponse(BaseModel):
+    mfa_enabled: bool
+    recovery_codes: list[str]
+
+
+class MfaLoginVerifyRequest(BaseModel):
+    challenge_token: str = Field(..., min_length=16, max_length=256)
+    code: str = Field(..., min_length=6, max_length=64)
+
+
+class MfaRegenerateRecoveryCodesRequest(BaseModel):
+    current_password: str = Field(..., min_length=1, max_length=128)
+    code: str = Field(..., min_length=6, max_length=64)
+
+
+class MfaRecoveryCodesResponse(BaseModel):
+    recovery_codes: list[str]
+
+
+class MfaDisableRequest(BaseModel):
+    current_password: str = Field(..., min_length=1, max_length=128)
+    code: str = Field(..., min_length=6, max_length=64)
+
+
+class MfaDisableResponse(BaseModel):
+    mfa_enabled: bool
+    revoked_sessions_count: int
+    message: str
 
 
 class RefreshRequest(BaseModel):
