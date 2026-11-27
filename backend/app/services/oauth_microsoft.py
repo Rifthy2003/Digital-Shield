@@ -23,6 +23,7 @@ import hmac
 import logging
 import secrets
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Callable
@@ -44,6 +45,11 @@ from app.services.oauth_google import (
 logger = logging.getLogger(__name__)
 
 MICROSOFT_CONSUMERS_TENANT_ID = "9188040d-6c67-4c5b-b112-36a304b66dad"
+MICROSOFT_ALLOWED_AUTHORITIES = frozenset({
+    "https://login.microsoftonline.com/common",
+    "https://login.microsoftonline.com/consumers",
+})
+MICROSOFT_DEFAULT_AUTHORITY = "https://login.microsoftonline.com/consumers"
 MICROSOFT_AUTH_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize"
 MICROSOFT_TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
 MICROSOFT_JWKS_URL = "https://login.microsoftonline.com/consumers/discovery/v2.0/keys"
@@ -51,6 +57,7 @@ MICROSOFT_GRAPH_ME_URL = "https://graph.microsoft.com/v1.0/me"
 MICROSOFT_CONSUMERS_ISSUERS = frozenset({
     f"https://login.microsoftonline.com/{MICROSOFT_CONSUMERS_TENANT_ID}/v2.0",
 })
+MICROSOFT_TRUSTED_ISSUER_PREFIX = "https://login.microsoftonline.com/"
 MICROSOFT_PERSONAL_SCOPES = ("openid", "profile", "email", "User.Read")
 
 DEFAULT_HTTP_TIMEOUT = 10.0
@@ -170,10 +177,20 @@ class MicrosoftOAuthService:
     ) -> None:
         self._settings = settings or get_settings()
         self._cipher = cipher
-        self._jwks_cache = jwks_cache or _MicrosoftJwksCache()
+        self._authority = self._resolve_authority()
+        self._auth_url = f"{self._authority}/oauth2/v2.0/authorize"
+        self._token_url = f"{self._authority}/oauth2/v2.0/token"
+        self._jwks_url = f"{self._authority}/discovery/v2.0/keys"
+        self._jwks_cache = jwks_cache or _MicrosoftJwksCache(jwks_url=self._jwks_url)
         self._http_client_factory = http_client_factory or (
             lambda: httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT)
         )
+
+    def _resolve_authority(self) -> str:
+        raw = (self._settings.MICROSOFT_AUTHORITY or MICROSOFT_DEFAULT_AUTHORITY).strip().rstrip("/")
+        if raw not in MICROSOFT_ALLOWED_AUTHORITIES:
+            raise MicrosoftOAuthNotConfiguredError("Invalid Microsoft OAuth authority configuration")
+        return raw
 
     def _get_cipher(self) -> TokenCipher:
         if self._cipher is not None:
@@ -183,21 +200,49 @@ class MicrosoftOAuthService:
         except Exception as exc:
             raise MicrosoftOAuthNotConfiguredError("Token encryption key is not configured") from exc
 
+    def _resolve_platform_config(self, platform: str = "web") -> tuple[str, str | None, str]:
+        normalized = (platform or "web").strip().lower()
+        if normalized == "web":
+            client_id = (self._settings.MICROSOFT_CLIENT_ID or "").strip()
+            client_secret = (self._settings.MICROSOFT_CLIENT_SECRET or "").strip()
+            redirect_uri = (self._settings.MICROSOFT_REDIRECT_URI or "").strip()
+            if not (client_id and client_secret and redirect_uri):
+                raise MicrosoftOAuthNotConfiguredError("Microsoft web OAuth is not configured")
+            return client_id, client_secret, redirect_uri
+
+        if normalized in ("android", "ios"):
+            client_id = (
+                (self._settings.MICROSOFT_MOBILE_CLIENT_ID or "").strip()
+                or (self._settings.MICROSOFT_CLIENT_ID or "").strip()
+            )
+            raw_uri = (
+                self._settings.MICROSOFT_ANDROID_REDIRECT_URI
+                if normalized == "android"
+                else self._settings.MICROSOFT_IOS_REDIRECT_URI
+            )
+            redirect_uri = (raw_uri or "").strip()
+            if not (client_id and redirect_uri):
+                raise MicrosoftOAuthNotConfiguredError(
+                    f"Microsoft {normalized} OAuth is not configured"
+                )
+            # Public mobile clients NEVER use a client_secret.
+            return client_id, None, redirect_uri
+
+        raise MicrosoftOAuthProviderError("Unsupported OAuth platform")
+
     def _require_config(self) -> tuple[str, str, str]:
-        client_id = (self._settings.MICROSOFT_CLIENT_ID or "").strip()
-        client_secret = (self._settings.MICROSOFT_CLIENT_SECRET or "").strip()
-        redirect_uri = (self._settings.MICROSOFT_REDIRECT_URI or "").strip()
-        if not (client_id and client_secret and redirect_uri):
-            raise MicrosoftOAuthNotConfiguredError("Microsoft OAuth is not configured")
+        client_id, client_secret, redirect_uri = self._resolve_platform_config("web")
+        assert client_secret is not None
         return client_id, client_secret, redirect_uri
 
     def build_authorization_request(
         self,
         *,
+        platform: str = "web",
         raw_state: str | None = None,
         raw_nonce: str | None = None,
     ) -> AuthorizationRequestArtifacts:
-        client_id, _, redirect_uri = self._require_config()
+        client_id, _, redirect_uri = self._resolve_platform_config(platform)
         cipher = self._get_cipher()
 
         state = raw_state or secrets.token_urlsafe(32)
@@ -219,7 +264,7 @@ class MicrosoftOAuthService:
         })
 
         return AuthorizationRequestArtifacts(
-            authorization_url=f"{MICROSOFT_AUTH_URL}?{query}",
+            authorization_url=f"{self._auth_url}?{query}",
             state_hash=hash_oauth_value(state),
             nonce_hash=hash_oauth_value(nonce),
             code_verifier_encrypted=cipher.encrypt(code_verifier),
@@ -232,9 +277,15 @@ class MicrosoftOAuthService:
         id_token: str,
         *,
         expected_nonce_hash: str,
+        expected_audience: str | None = None,
         http_client: httpx.AsyncClient | None = None,
     ) -> dict[str, Any]:
-        client_id, _, _ = self._require_config()
+        audience = expected_audience or (
+            (self._settings.MICROSOFT_CLIENT_ID or "").strip()
+            or (self._settings.MICROSOFT_MOBILE_CLIENT_ID or "").strip()
+        )
+        if not audience:
+            raise MicrosoftOAuthNotConfiguredError("Microsoft OAuth is not configured")
         if not id_token or not expected_nonce_hash:
             raise MicrosoftIdTokenValidationError("Missing id_token or expected nonce")
 
@@ -248,33 +299,16 @@ class MicrosoftOAuthService:
         if alg != "RS256" or not isinstance(kid, str) or not kid:
             raise MicrosoftIdTokenValidationError("Unsupported id_token signing algorithm or missing kid")
 
-        signing_key = await self._jwks_cache.get_signing_key(kid, http_client=http_client)
+        owns_client = http_client is None
+        client = http_client or self._http_client_factory()
         try:
-            claims = jwt.decode(
-                id_token,
-                key=signing_key,
-                algorithms=["RS256"],
-                audience=client_id,
-                options={
-                    "require": ["iss", "sub", "aud", "exp", "iat"],
-                    "verify_signature": True,
-                    "verify_exp": True,
-                    "verify_iat": True,
-                    "verify_aud": True,
-                    "verify_iss": False,
-                },
-                leeway=30,
-            )
-        except jwt.InvalidSignatureError:
-            signing_key = await self._jwks_cache.get_signing_key(
-                kid, http_client=http_client, force_refresh=True
-            )
+            signing_key = await self._jwks_cache.get_signing_key(kid, http_client=client)
             try:
                 claims = jwt.decode(
                     id_token,
                     key=signing_key,
                     algorithms=["RS256"],
-                    audience=client_id,
+                    audience=audience,
                     options={
                         "require": ["iss", "sub", "aud", "exp", "iat"],
                         "verify_signature": True,
@@ -285,14 +319,55 @@ class MicrosoftOAuthService:
                     },
                     leeway=30,
                 )
+            except jwt.InvalidSignatureError:
+                signing_key = await self._jwks_cache.get_signing_key(
+                    kid, http_client=client, force_refresh=True
+                )
+                try:
+                    claims = jwt.decode(
+                        id_token,
+                        key=signing_key,
+                        algorithms=["RS256"],
+                        audience=audience,
+                        options={
+                            "require": ["iss", "sub", "aud", "exp", "iat"],
+                            "verify_signature": True,
+                            "verify_exp": True,
+                            "verify_iat": True,
+                            "verify_aud": True,
+                            "verify_iss": False,
+                        },
+                        leeway=30,
+                    )
+                except jwt.PyJWTError as exc:
+                    raise MicrosoftIdTokenValidationError("Invalid id_token signature or claims") from exc
             except jwt.PyJWTError as exc:
-                raise MicrosoftIdTokenValidationError("Invalid id_token signature or claims") from exc
-        except jwt.PyJWTError as exc:
-            raise MicrosoftIdTokenValidationError("Invalid id_token claims") from exc
+                raise MicrosoftIdTokenValidationError("Invalid id_token claims") from exc
+        finally:
+            if owns_client:
+                await client.aclose()
 
         issuer = claims.get("iss")
-        if not isinstance(issuer, str) or issuer not in MICROSOFT_CONSUMERS_ISSUERS:
-            raise MicrosoftIdTokenValidationError("Invalid id_token issuer for personal Microsoft account")
+        tid = claims.get("tid")
+        if not isinstance(issuer, str) or not isinstance(tid, str):
+            raise MicrosoftIdTokenValidationError("Missing id_token issuer or tenant id")
+
+        normalized_tid = tid.strip().lower()
+        try:
+            parsed_tid = uuid.UUID(normalized_tid)
+        except ValueError as exc:
+            raise MicrosoftIdTokenValidationError("Invalid id_token tenant id") from exc
+        if str(parsed_tid) != normalized_tid:
+            raise MicrosoftIdTokenValidationError("Malformed id_token tenant id")
+
+        if self._authority.endswith("/consumers") and normalized_tid != MICROSOFT_CONSUMERS_TENANT_ID:
+            raise MicrosoftIdTokenValidationError(
+                "Organizational tenant token is not permitted for /consumers authority"
+            )
+
+        expected_issuer = f"{MICROSOFT_TRUSTED_ISSUER_PREFIX}{normalized_tid}/v2.0"
+        if not hmac.compare_digest(issuer, expected_issuer):
+            raise MicrosoftIdTokenValidationError("Untrusted or mismatched id_token issuer")
 
         raw_nonce = claims.get("nonce")
         if not isinstance(raw_nonce, str) or not raw_nonce:
@@ -379,9 +454,15 @@ class MicrosoftOAuthService:
         code: str,
         code_verifier_encrypted: str,
         expected_nonce_hash: str,
+        platform: str = "web",
+        expected_redirect_uri: str | None = None,
         existing_refresh_token_encrypted: str | None = None,
     ) -> MicrosoftCallbackResult:
-        client_id, client_secret, redirect_uri = self._require_config()
+        client_id, client_secret, redirect_uri = self._resolve_platform_config(platform)
+        if expected_redirect_uri is not None and not hmac.compare_digest(
+            expected_redirect_uri.strip(), redirect_uri
+        ):
+            raise MicrosoftOAuthProviderError("Redirect URI mismatch")
         cipher = self._get_cipher()
 
         if not code or not code.strip():
@@ -389,19 +470,22 @@ class MicrosoftOAuthService:
 
         code_verifier = cipher.decrypt(code_verifier_encrypted)
 
+        token_data: dict[str, str] = {
+            "grant_type": "authorization_code",
+            "code": code.strip(),
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "code_verifier": code_verifier,
+            "scope": " ".join(MICROSOFT_PERSONAL_SCOPES),
+        }
+        if client_secret is not None:
+            token_data["client_secret"] = client_secret
+
         async with self._http_client_factory() as client:
             try:
                 token_resp = await client.post(
-                    MICROSOFT_TOKEN_URL,
-                    data={
-                        "grant_type": "authorization_code",
-                        "code": code.strip(),
-                        "client_id": client_id,
-                        "client_secret": client_secret,
-                        "redirect_uri": redirect_uri,
-                        "code_verifier": code_verifier,
-                        "scope": " ".join(MICROSOFT_PERSONAL_SCOPES),
-                    },
+                    self._token_url,
+                    data=token_data,
                     headers={"Accept": "application/json"},
                 )
             except httpx.HTTPError as exc:
@@ -423,6 +507,7 @@ class MicrosoftOAuthService:
             claims = await self.validate_id_token(
                 id_token,
                 expected_nonce_hash=expected_nonce_hash,
+                expected_audience=client_id,
                 http_client=client,
             )
 
@@ -453,22 +538,30 @@ class MicrosoftOAuthService:
         )
         return MicrosoftCallbackResult(identity=identity, tokens=encrypted_tokens)
 
-    async def refresh_access_token(self, encrypted_refresh_token: str) -> EncryptedOAuthTokens:
-        client_id, client_secret, _ = self._require_config()
+    async def refresh_access_token(
+        self,
+        encrypted_refresh_token: str,
+        *,
+        platform: str = "web",
+    ) -> EncryptedOAuthTokens:
+        client_id, client_secret, _ = self._resolve_platform_config(platform)
         cipher = self._get_cipher()
         refresh_token = cipher.decrypt(encrypted_refresh_token)
+
+        refresh_data: dict[str, str] = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": client_id,
+            "scope": " ".join(MICROSOFT_PERSONAL_SCOPES),
+        }
+        if client_secret is not None:
+            refresh_data["client_secret"] = client_secret
 
         async with self._http_client_factory() as client:
             try:
                 resp = await client.post(
-                    MICROSOFT_TOKEN_URL,
-                    data={
-                        "grant_type": "refresh_token",
-                        "refresh_token": refresh_token,
-                        "client_id": client_id,
-                        "client_secret": client_secret,
-                        "scope": " ".join(MICROSOFT_PERSONAL_SCOPES),
-                    },
+                    self._token_url,
+                    data=refresh_data,
                     headers={"Accept": "application/json"},
                 )
             except httpx.HTTPError as exc:

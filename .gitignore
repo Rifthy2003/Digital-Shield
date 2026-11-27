@@ -28,3 +28,13 @@ dist/
 # Logs
 *.log
 .env.local
+
+# Android / Gradle generated files
+.gradle/
+**/build/
+local.properties
+*.apk
+*.aab
+
+# IDE files
+*.iml

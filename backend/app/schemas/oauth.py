@@ -1,5 +1,9 @@
-"""Pydantic schemas for OAuth & Connected Accounts (Phase 18 — Task 18.5)."""
-from pydantic import BaseModel, Field, field_validator
+"""Pydantic schemas for OAuth & Connected Accounts (Phase 18 — Task 18.5 & P1-C)."""
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+OAuthPlatform = Literal["web", "android", "ios"]
 
 
 class OAuthProviderInfo(BaseModel):
@@ -7,6 +11,7 @@ class OAuthProviderInfo(BaseModel):
     display_name: str
     account_type: str = "personal"
     configured: bool
+    supported_platforms: list[OAuthPlatform] = ["web"]
     scopes: list[str]
     capabilities: dict[str, str] = {}
     required_permissions: list[str] = []
@@ -18,15 +23,25 @@ class OAuthProvidersResponse(BaseModel):
     providers: list[OAuthProviderInfo]
 
 
+class OAuthAuthorizeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    platform: OAuthPlatform = "web"
+
+
 class OAuthAuthorizeResponse(BaseModel):
     provider: str
+    platform: OAuthPlatform = "web"
     authorization_url: str
     expires_at: str
 
 
 class OAuthCallbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     code: str = Field(..., min_length=1, max_length=2048)
     state: str = Field(..., min_length=16, max_length=512)
+    platform: OAuthPlatform = "web"
 
     @field_validator("code", "state")
     @classmethod

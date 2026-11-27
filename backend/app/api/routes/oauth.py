@@ -13,7 +13,7 @@ Security guarantees:
 from datetime import datetime, timedelta
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -27,8 +27,10 @@ from app.models.oauth import ConnectedAccount, OAuthState, OAuthToken
 from app.schemas.oauth import (
     ConnectedAccountResponse,
     DisconnectAccountResponse,
+    OAuthAuthorizeRequest,
     OAuthAuthorizeResponse,
     OAuthCallbackRequest,
+    OAuthPlatform,
     OAuthProviderInfo,
     OAuthProvidersResponse,
 )
@@ -110,6 +112,25 @@ def list_oauth_providers(user: CurrentUser):
     """List supported OAuth providers, configuration status, and capability matrix."""
     settings = get_settings()
     token_key_ok = bool(settings.TOKEN_ENCRYPTION_KEY and settings.TOKEN_ENCRYPTION_KEY.strip())
+    ms_platforms: list[OAuthPlatform] = []
+    if (
+        settings.microsoft_web_oauth_enabled
+        and settings.MICROSOFT_CLIENT_ID
+        and settings.MICROSOFT_CLIENT_SECRET
+        and settings.MICROSOFT_REDIRECT_URI
+        and token_key_ok
+    ):
+        ms_platforms.append("web")
+    mobile_cid = (
+        (settings.MICROSOFT_MOBILE_CLIENT_ID or "").strip()
+        or (settings.MICROSOFT_CLIENT_ID or "").strip()
+    )
+    if mobile_cid and token_key_ok:
+        if settings.MICROSOFT_ANDROID_REDIRECT_URI and settings.MICROSOFT_ANDROID_REDIRECT_URI.strip():
+            ms_platforms.append("android")
+        if settings.MICROSOFT_IOS_REDIRECT_URI and settings.MICROSOFT_IOS_REDIRECT_URI.strip():
+            ms_platforms.append("ios")
+
     configured_map = {
         "google": bool(
             settings.google_oauth_enabled
@@ -118,13 +139,11 @@ def list_oauth_providers(user: CurrentUser):
             and settings.GOOGLE_REDIRECT_URI
             and token_key_ok
         ),
-        "microsoft": bool(
-            settings.microsoft_oauth_enabled
-            and settings.MICROSOFT_CLIENT_ID
-            and settings.MICROSOFT_CLIENT_SECRET
-            and settings.MICROSOFT_REDIRECT_URI
-            and token_key_ok
-        ),
+        "microsoft": bool(ms_platforms),
+    }
+    platforms_map: dict[str, list[OAuthPlatform]] = {
+        "google": ["web"],
+        "microsoft": ms_platforms or ["web"],
     }
     return OAuthProvidersResponse(
         providers=[
@@ -133,6 +152,7 @@ def list_oauth_providers(user: CurrentUser):
                 display_name=entry.display_name,
                 account_type=entry.account_type,
                 configured=configured_map.get(entry.provider, False),
+                supported_platforms=platforms_map.get(entry.provider, ["web"]),
                 scopes=list(entry.required_permissions),
                 capabilities=entry.capabilities.as_dict(),
                 required_permissions=list(entry.required_permissions),
@@ -483,10 +503,14 @@ def _start_provider_authorization(
     user: CurrentUser,
     db: Session,
     svc: GoogleOAuthService | MicrosoftOAuthService,
+    platform: OAuthPlatform = "web",
 ) -> OAuthAuthorizeResponse:
     cleanup_expired_oauth_states(db)
     try:
-        artifacts = svc.build_authorization_request()
+        if isinstance(svc, MicrosoftOAuthService):
+            artifacts = svc.build_authorization_request(platform=platform)
+        else:
+            artifacts = svc.build_authorization_request()
     except (GoogleOAuthNotConfiguredError, MicrosoftOAuthNotConfiguredError) as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -499,6 +523,7 @@ def _start_provider_authorization(
         OAuthState(
             user_id=user.id,
             provider=provider,
+            platform=platform,
             state_hash=artifacts.state_hash,
             nonce_hash=artifacts.nonce_hash,
             code_verifier_encrypted=artifacts.code_verifier_encrypted,
@@ -513,11 +538,12 @@ def _start_provider_authorization(
         db,
         actor_id=user.id,
         action="oauth.authorization_started",
-        details={"provider": provider},
+        details={"provider": provider, "platform": platform},
         request=request,
     )
     return OAuthAuthorizeResponse(
         provider=provider,
+        platform=platform,
         authorization_url=artifacts.authorization_url,
         expires_at=expires_at.isoformat(),
     )
@@ -542,6 +568,7 @@ async def _complete_provider_callback(
             OAuthState.state_hash == state_hash,
             OAuthState.user_id == user.id,
             OAuthState.provider == provider,
+            OAuthState.platform == payload.platform,
             OAuthState.used.is_(False),
             OAuthState.expires_at > now,
         )
@@ -553,7 +580,7 @@ async def _complete_provider_callback(
             db,
             actor_id=user.id,
             action="oauth.callback_failed",
-            details={"provider": provider, "reason": "invalid_or_expired_state"},
+            details={"provider": provider, "platform": payload.platform, "reason": "invalid_or_expired_state"},
             request=request,
         )
         raise HTTPException(
@@ -571,14 +598,24 @@ async def _complete_provider_callback(
 
     code_verifier_encrypted = consumed_state.code_verifier_encrypted
     nonce_hash = consumed_state.nonce_hash or ""
+    expected_redirect_uri = consumed_state.redirect_uri
     db.commit()
 
     try:
-        cb_result = await svc.exchange_code_for_tokens(
-            code=payload.code,
-            code_verifier_encrypted=code_verifier_encrypted,
-            expected_nonce_hash=nonce_hash,
-        )
+        if isinstance(svc, MicrosoftOAuthService):
+            cb_result = await svc.exchange_code_for_tokens(
+                code=payload.code,
+                code_verifier_encrypted=code_verifier_encrypted,
+                expected_nonce_hash=nonce_hash,
+                platform=payload.platform,
+                expected_redirect_uri=expected_redirect_uri,
+            )
+        else:
+            cb_result = await svc.exchange_code_for_tokens(
+                code=payload.code,
+                code_verifier_encrypted=code_verifier_encrypted,
+                expected_nonce_hash=nonce_hash,
+            )
     except (GoogleIdTokenValidationError, MicrosoftIdTokenValidationError) as exc:
         record_audit_event(
             db,
@@ -719,10 +756,12 @@ async def _complete_provider_callback(
 def authorize_microsoft(
     request: Request,
     user: CurrentUser,
+    payload: OAuthAuthorizeRequest | None = Body(default=None),
     db: Session = Depends(get_db),
     microsoft_svc: MicrosoftOAuthService = Depends(get_microsoft_oauth_service),
 ):
     """Initiate Microsoft Personal Account OAuth 2.0 / OIDC authorization with PKCE S256."""
+    platform: OAuthPlatform = payload.platform if payload is not None else "web"
     return _start_provider_authorization(
         provider="microsoft",
         display_name="Microsoft",
@@ -730,6 +769,7 @@ def authorize_microsoft(
         user=user,
         db=db,
         svc=microsoft_svc,
+        platform=platform,
     )
 
 

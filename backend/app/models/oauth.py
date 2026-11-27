@@ -37,6 +37,7 @@ class OAuthState(Base):
         String(36), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
     )
     provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    platform: Mapped[str] = mapped_column(String(16), default="web", nullable=False)
     state_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
     nonce_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     code_verifier_encrypted: Mapped[str] = mapped_column(Text, nullable=False)

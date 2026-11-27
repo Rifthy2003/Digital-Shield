@@ -6,6 +6,7 @@ variables (see .env.example). Nothing sensitive is hardcoded here, and
 nothing here should ever be committed with real values filled in.
 """
 import logging
+import re
 from urllib.parse import urlparse
 from functools import lru_cache
 from typing import List
@@ -164,6 +165,9 @@ class Settings(BaseSettings):
     MICROSOFT_CLIENT_ID: str | None = None
     MICROSOFT_CLIENT_SECRET: str | None = None
     MICROSOFT_REDIRECT_URI: str | None = None
+    MICROSOFT_MOBILE_CLIENT_ID: str | None = None
+    MICROSOFT_ANDROID_REDIRECT_URI: str | None = None
+    MICROSOFT_IOS_REDIRECT_URI: str | None = None
     MICROSOFT_AUTHORITY: str = "https://login.microsoftonline.com/consumers"
 
     @property
@@ -175,12 +179,24 @@ class Settings(BaseSettings):
         )
 
     @property
-    def microsoft_oauth_enabled(self) -> bool:
+    def microsoft_web_oauth_enabled(self) -> bool:
         return bool(
             (self.MICROSOFT_CLIENT_ID and self.MICROSOFT_CLIENT_ID.strip())
             or (self.MICROSOFT_CLIENT_SECRET and self.MICROSOFT_CLIENT_SECRET.strip())
             or (self.MICROSOFT_REDIRECT_URI and self.MICROSOFT_REDIRECT_URI.strip())
         )
+
+    @property
+    def microsoft_mobile_oauth_enabled(self) -> bool:
+        return bool(
+            (self.MICROSOFT_MOBILE_CLIENT_ID and self.MICROSOFT_MOBILE_CLIENT_ID.strip())
+            or (self.MICROSOFT_ANDROID_REDIRECT_URI and self.MICROSOFT_ANDROID_REDIRECT_URI.strip())
+            or (self.MICROSOFT_IOS_REDIRECT_URI and self.MICROSOFT_IOS_REDIRECT_URI.strip())
+        )
+
+    @property
+    def microsoft_oauth_enabled(self) -> bool:
+        return self.microsoft_web_oauth_enabled or self.microsoft_mobile_oauth_enabled
 
     @model_validator(mode="after")
     def validate_oauth_configuration(self) -> "Settings":
@@ -227,32 +243,74 @@ class Settings(BaseSettings):
                 )
 
         if self.microsoft_oauth_enabled:
-            missing_ms = [
-                name
-                for name, val in (
-                    ("MICROSOFT_CLIENT_ID", self.MICROSOFT_CLIENT_ID),
-                    ("MICROSOFT_CLIENT_SECRET", self.MICROSOFT_CLIENT_SECRET),
-                    ("MICROSOFT_REDIRECT_URI", self.MICROSOFT_REDIRECT_URI),
-                )
-                if not val or not val.strip()
-            ]
-            if missing_ms:
-                raise ValueError(
-                    f"Incomplete Microsoft OAuth configuration; missing required setting(s): {', '.join(missing_ms)}."
-                )
-
-            parsed_ms_uri = urlparse(self.MICROSOFT_REDIRECT_URI.strip())
             is_production = self.ENVIRONMENT.strip().lower() == "production"
-            allowed_schemes = {"https"} if is_production else {"http", "https"}
-            if parsed_ms_uri.scheme.lower() not in allowed_schemes or not parsed_ms_uri.netloc:
+            if self.microsoft_web_oauth_enabled and (
+                (self.MICROSOFT_CLIENT_SECRET and self.MICROSOFT_CLIENT_SECRET.strip())
+                or (self.MICROSOFT_REDIRECT_URI and self.MICROSOFT_REDIRECT_URI.strip())
+                or not self.microsoft_mobile_oauth_enabled
+            ):
+                missing_ms = [
+                    name
+                    for name, val in (
+                        ("MICROSOFT_CLIENT_ID", self.MICROSOFT_CLIENT_ID),
+                        ("MICROSOFT_CLIENT_SECRET", self.MICROSOFT_CLIENT_SECRET),
+                        ("MICROSOFT_REDIRECT_URI", self.MICROSOFT_REDIRECT_URI),
+                    )
+                    if not val or not val.strip()
+                ]
+                if missing_ms:
+                    raise ValueError(
+                        f"Incomplete Microsoft OAuth configuration; missing required setting(s): {', '.join(missing_ms)}."
+                    )
+
+                parsed_ms_uri = urlparse(self.MICROSOFT_REDIRECT_URI.strip())
+                allowed_schemes = {"https"} if is_production else {"http", "https"}
+                if parsed_ms_uri.scheme.lower() not in allowed_schemes or not parsed_ms_uri.netloc:
+                    raise ValueError(
+                        "MICROSOFT_REDIRECT_URI must be a valid absolute URL"
+                        + (" using https in production." if is_production else " (http or https).")
+                    )
+
+            for field_name, raw_mobile_uri in (
+                ("MICROSOFT_ANDROID_REDIRECT_URI", self.MICROSOFT_ANDROID_REDIRECT_URI),
+                ("MICROSOFT_IOS_REDIRECT_URI", self.MICROSOFT_IOS_REDIRECT_URI),
+            ):
+                if raw_mobile_uri is not None and raw_mobile_uri.strip():
+                    parsed_mob = urlparse(raw_mobile_uri.strip())
+                    scheme = parsed_mob.scheme.lower()
+                    disallowed = {"javascript", "data", "vbscript", "file"}
+                    if (
+                        not scheme
+                        or not re.fullmatch(r"[a-z][a-z0-9+.-]*", scheme)
+                        or scheme in disallowed
+                        or (is_production and scheme == "http")
+                        or (not parsed_mob.netloc and not parsed_mob.path)
+                    ):
+                        raise ValueError(
+                            f"{field_name} must be a valid redirect URI with an allowed scheme."
+                        )
+
+            effective_mobile_cid = (
+                (self.MICROSOFT_MOBILE_CLIENT_ID or "").strip()
+                or (self.MICROSOFT_CLIENT_ID or "").strip()
+            )
+            if self.microsoft_mobile_oauth_enabled and not effective_mobile_cid:
                 raise ValueError(
-                    "MICROSOFT_REDIRECT_URI must be a valid absolute URL"
-                    + (" using https in production." if is_production else " (http or https).")
+                    "MICROSOFT_MOBILE_CLIENT_ID or MICROSOFT_CLIENT_ID must be configured for mobile Microsoft OAuth."
                 )
 
             if not raw_enc_key or not raw_enc_key.strip():
                 raise ValueError(
                     "TOKEN_ENCRYPTION_KEY must be configured when OAuth is enabled."
+                )
+
+            authority = (self.MICROSOFT_AUTHORITY or "").strip().rstrip("/")
+            if authority not in {
+                "https://login.microsoftonline.com/common",
+                "https://login.microsoftonline.com/consumers",
+            }:
+                raise ValueError(
+                    "MICROSOFT_AUTHORITY must be 'https://login.microsoftonline.com/common' or 'https://login.microsoftonline.com/consumers'."
                 )
 
         return self
